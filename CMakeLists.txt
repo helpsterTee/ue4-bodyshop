@@ -5,9 +5,12 @@ set(PROJECT_VERSION 0.0.1)
 
 project(${PROJECT_NAME} VERSION ${PROJECT_VERSION} LANGUAGES CXX)
 
+set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake_modules)
+
 set(SOURCES
     source/main.cpp
 )
+
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 
@@ -80,10 +83,21 @@ if(NOT KINECT2_LIB)
 	message(FATAL_ERROR "kinect2 library not found.")
 endif()
 
+
+# ------------ opencv related stuff ------------- #
+find_package( OpenCV REQUIRED )
+
+
+# ------------- eigen .... ---------------------- #
+find_package( Eigen3 REQUIRED )
+include_directories(${EIGEN3_INCLUDE_DIR})
+
+
+# ------------ put it all together ------------- #
 target_include_directories(${PROJECT_NAME}
     PUBLIC ${BX_DIR}/include ${BGFX_DIR}/include ${BGFX_COMMON_DIR} ${KINECT2_DIR}/inc
 )
 
 target_link_libraries(${PROJECT_NAME}
-    PUBLIC ${BX_LIB} ${BGFX_LIB} ${BGFX_COMMON_LIB} ${KINECT2_LIB} ib-compress ocornut-imgui
+    PUBLIC ${BX_LIB} ${BGFX_LIB} ${BGFX_COMMON_LIB} ${KINECT2_LIB} ib-compress ocornut-imgui ${OpenCV_LIBS}
 )
