@@ -1,171 +1,15 @@
-#include "common.h"
-#include "bgfx_utils.h"
-#include "imgui/imgui.h"
-#include "camera.h"
+#include <common.h>
+#include <bgfx_utils.h>
+#include <imgui/imgui.h>
+#include <camera.h>
 #include <opencv2/core.hpp>
 #include <bgfx/bgfx.h>
-#include "Kinect.h"
+#include <Kinect.h>
 #include <stdexcept>
 #include <cmath>
 
 
-
-struct Vector3
-{
-	float x, y, z;
-
-	Vector3(float _x, float _y, float _z):x(_x), y(_y), z(_z){}
-
-	Vector3(const CameraSpacePoint& p):x(p.X), y(p.Y), z(p.Z){}
-
-	Vector3(const Vector3& v)
-	{
-		this->x = v.x;
-		this->y = v.y;
-		this->z = v.z;
-	}
-
-	Vector3(Vector3&& v)
-	{
-		this->x = v.x;
-		this->y = v.y;
-		this->z = v.z;
-	}
-
-	Vector3 operator=(const Vector3& v)
-	{
-		this->x = v.x;
-		this->y = v.y;
-		this->z = v.z;
-		return *this;
-	}
-
-	float length() const
-	{
-		return std::sqrt(x*x + y*y + z*z);
-	}
-
-	void normalize()
-	{
-		const float len = this->length();
-		x /= len; 
-		y /= len; 
-		z /= len;
-	}
-
-	Vector3 operator-(const Vector3& v) const
-	{
-		return{ x - v.x,y - v.y,z - v.z };
-	}
-
-	Vector3 operator+(const Vector3& v) const
-	{
-		return{ x + v.x,y + v.y,z + v.z };
-	}
-
-	Vector3 operator*(const float& scalar) const
-	{
-		return{ x*scalar,y*scalar,z*scalar };
-	}
-};
-
-
-
-float dot(const Vector3& v1, const Vector3& v2) 
-{
-	return v1.x*v2.x + v1.y*v2.y + v1.z*v2.z;
-}
-
-
-
-Vector3 cross(const Vector3& v1, const Vector3& v2)
-{
-	return{ v1.y * v2.z - v1.z * v2.y, v1.z * v2.x - v1.x * v2.z, v1.x * v2.y - v1.y * v2.x };
-}
-
-
-
-struct Plane 
-{
-	float a, b, c, d;
-
-	Plane() = default;
-
-	Plane(const Vector3& p1, const Vector3& p2, const Vector3 &p3)
-	{
-		Vector3 n = cross(p2 - p1, p3 - p1);
-		d = dot(n, p1);
-		a = n.x;
-		b = n.y;
-		c = n.z;
-	}
-
-	Plane(const Vector3& normal, const Vector3 &p)
-	{
-		a = normal.x;
-		b = normal.y;
-		c = normal.z;
-		d = dot(normal, p);
-	}
-
-	Vector3 normal() const
-	{
-		return{ a, b, c };
-	}
-};
-
-float distance(const Plane & plane, const Vector3 & point)
-{
-	return dot({ plane.a, plane.b, plane.c }, point) + plane.d;
-}
-
-float angle(const Plane& p1, const Plane& p2)
-{
-	auto n1 = p1.normal();
-	auto n2 = p2.normal();
-	return std::acos(dot(n1,n2)/(n1.length()*n2.length()));
-}
-
-template<class Interface>
-static inline void SafeRelease(Interface *&interfaceToRelease)
-{
-	if (interfaceToRelease != nullptr) {
-		interfaceToRelease->Release();
-		interfaceToRelease = nullptr;
-	}
-}
-
-//! Interface to manage COM classes in an exception-safe manner
-template<class Interface>
-class ComWrapper
-{
-private:
-	Interface* iface = nullptr;
-
-public:
-	ComWrapper() = default;
-
-	bool isset() const
-	{
-		return iface == nullptr;
-	}
-
-	~ComWrapper()
-	{
-		SafeRelease(iface);
-	}
-
-	Interface** address()
-	{
-		return &iface;
-	}
-
-	Interface*& operator->()
-	{
-		return iface;
-	}
-};
-
+#include "util.hpp"
 
 //! Synchronous data provider
 class KinectDataProvider
@@ -409,80 +253,8 @@ public:
 };
 
 
-class RenderImage
-{
-private:
-	bgfx::TextureHandle mHandle;
-	const bgfx::Memory* mBuffer;
 
-	const unsigned int mWidth;
-	const unsigned int mHeight;
-
-public:
-	RenderImage(const unsigned int width, const unsigned int height)
-		: mWidth(width), mHeight(height)
-	{
-		mHandle = bgfx::createTexture2D(width, height, false, 1, bgfx::TextureFormat::RGBA8, BGFX_TEXTURE_NONE);
-		mBuffer = bgfx::alloc(width * height * 4);
-	}
-
-	bgfx::TextureHandle handle() const
-	{
-		return mHandle;
-	}
-
-	bgfx::TextureFormat::Enum format() const
-	{
-		bgfx::TextureFormat::RGBA8;
-	}
-
-	unsigned int width() const
-	{
-		return mWidth;
-	}
-
-	unsigned int height() const
-	{
-		return mHeight;
-	}
-
-	void writePixel(const int x, const int y, const int red, const int green, const int blue, const int alpha)
-	{
-		auto pos = 4*(y*width() + x);
-		mBuffer->data[pos] = red;
-		mBuffer->data[pos+1] = green;
-		mBuffer->data[pos+2] = blue;
-		mBuffer->data[pos+3] = alpha;
-	}
-
-	void writePixel(const int x, const int y, const int grey)
-	{
-		writePixel(x, y, grey, grey, grey, 255);
-	}
-
-	void writePixel(const int x, const int y, const int red, const int green, const int blue)
-	{
-		writePixel(x, y, red, green, blue, 255);
-	}
-
-	void update()
-	{
-		bgfx::updateTexture2D(mHandle, 0, 0, 0, 0, width(), height(), bgfx::copy(mBuffer->data, mBuffer->size));
-	}
-
-	void clear()
-	{
-		std::memset(mBuffer->data, 0, mBuffer->size);
-	}
-};
-
-
-
-template<class T>
-constexpr const T& clamp(const T& v, const T& lo, const T& hi)
-{
-	return std::max<T>(lo,std::min<T>(v, hi));
-}
+#include "render_image.hpp"
 
 
 
@@ -531,14 +303,17 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <vector>
 #include <memory>
 #include <numeric>
+#include <algorithm>
 
 #include <opencv2/superres.hpp>
 #include <eigen/Core>
+
+#include <iostream>
 class ReconstructionState
 {
 private:
-	std::vector<const bgfx::Memory*> mColorImages;
-	std::vector<const bgfx::Memory*> mDepthImages;
+	std::vector<Bgfx2DMemoryHelper<RGBQUAD>> mColorImages;
+	std::vector<Bgfx2DMemoryHelper<uint16_t>> mDepthImages;
 	std::vector<Joint[JointType_Count]> mJointData;
 
 	const unsigned int mChunkSize;
@@ -564,7 +339,7 @@ public:
 		mCurrentImageInChunk = 0;
 	}
 
-	void feed(const bgfx::Memory* colorImage, const bgfx::Memory* depthImage, Joint joints[JointType_Count])
+	void feed(Bgfx2DMemoryHelper<RGBQUAD> colorImage, Bgfx2DMemoryHelper<uint16_t> depthImage, Joint joints[JointType_Count])
 	{
 		if(hasEnoughData())
 		{
@@ -596,61 +371,136 @@ public:
 		return mCurrentChunk == mNumChunks;
 	}
 
-	std::vector<const bgfx::Memory*> reconstructAvatar(KinectDataProvider* KDP)
+	std::shared_ptr<RenderImage> reconstructAvatar(KinectDataProvider* KDP)
 	{
-		
 		auto CM = KDP->CoordinateMapper();
-		std::vector<const bgfx::Memory*> SuperresDepthImages(mNumChunks);
+		std::vector<Bgfx2DMemoryHelper<uint16_t>> SuperresDepthImages(mNumChunks);
+
+		std::vector<Bgfx2DMemoryHelper<float>> W(mNumChunks); // buffer for Wk
+		for (int i = 0;i < mNumChunks;i++)
+		{
+			W[i] = Bgfx2DMemoryHelper<float>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
+		}
+		
 
 		for (int curDepthImageIdx = 0; curDepthImageIdx < 1; curDepthImageIdx++)
 		{
 			std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
-			auto depthDataRaw = reinterpret_cast<uint16_t*>(mDepthImages[curDepthImageIdx]->data);
-			CM->MapColorFrameToDepthSpace(mDepthImages[curDepthImageIdx]->size / sizeof(uint16_t), depthDataRaw, KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
+			CM->MapColorFrameToDepthSpace(mDepthImages[curDepthImageIdx].width()*mDepthImages[curDepthImageIdx].height(), mDepthImages[curDepthImageIdx].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
 
 			// superresolution
-			Eigen::MatrixXf A(3, KDP->ColorDataWidth()*KDP->ColorDataHeight());
-
 			constexpr float errorBound = 0.005;
-			float error = 0;
-			SuperresDepthImages[curDepthImageIdx] = bgfx::alloc(KDP->ColorDataWidth()*KDP->ColorDataHeight()*sizeof(uint16_t));
+			constexpr float gamma = 0.8;
+
+			SuperresDepthImages[curDepthImageIdx] = Bgfx2DMemoryHelper<uint16_t>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
 			// make an initial guess
-			auto lastIter = bgfx::copy(SuperresDepthImages[curDepthImageIdx]->data, SuperresDepthImages[curDepthImageIdx]->size);		
-			for (int pos = 0; pos < KDP->ColorDataWidth()*KDP->ColorDataHeight(); pos++)
+			for (int y = 0; y < KDP->ColorDataHeight(); y++)
 			{
-				auto sourcePos = static_cast<int>(depthPoints[pos].Y*KDP->DepthDataWidth() + depthPoints[pos].X);
-				SuperresDepthImages[curDepthImageIdx]->data[pos] = mDepthImages[curDepthImageIdx]->data[sourcePos];
+				for (int x = 0; x < KDP->ColorDataWidth(); x++)
+				{
+					auto dp = depthPoints[y*KDP->ColorDataWidth() + x];
+					if (isinf(dp.X) || isinf(dp.Y))
+					{
+						SuperresDepthImages[curDepthImageIdx].write(x, y, 0);
+					}
+					else
+					{
+						SuperresDepthImages[curDepthImageIdx].write(x, y, mDepthImages[mChunkSize*curDepthImageIdx+mChunkSize/2].read(dp.X, dp.Y)/16);
+					}
+				}				
 			}
-			do // approximate with gauss-seidel
+			// prepare W
+			for (int k = 0;k < mNumChunks; k++)
 			{
-				error = 0;
 				for (int y = 1;y < KDP->ColorDataHeight() - 1; y++)
 				{
 					for (int x = 1;x < KDP->ColorDataWidth() - 1; x++)
 					{
-
+						int sum = 0;
+						for (int ks = 0;ks < mChunkSize;ks++)
+						{
+							sum += *reinterpret_cast<uint32_t*>(&mColorImages[curDepthImageIdx*mChunkSize + k].read(x, y));
+						}
+						W[k].write(x, y, (0xFFFFFF - (*reinterpret_cast<uint32_t*>(&mColorImages[curDepthImageIdx*mChunkSize + k].read(x, y)) - sum / mChunkSize))/ 0xFFFFFF);
 					}
 				}
-				//SuperresDepthImages[curDepthImageIdx]->data
+			}
+			//std::cout << "Starting approximation " << curDepthImageIdx << std::endl;
+			// approximation with gauss-seidel
+			float error = 0;
+			do 
+			{
+				error = 0;
+				auto prevData = SuperresDepthImages[curDepthImageIdx].clone();
+				for (int y = 1;y < KDP->ColorDataHeight() - 1; y++)
+				{
+					for (int x = 1;x < KDP->ColorDataWidth() - 1; x++)
+					{
+						//first two loops give k
+						//auto superresData = reinterpret_cast<uint16_t*>(SuperresDepthImages[curDepthImageIdx]->data);
+						//auto previousSuperresData = reinterpret_cast<uint16_t*>(last->data);
+						auto sumWk = 0.;
+						auto b = 0.;
+						for (int k = 0;k < mNumChunks;k++)
+						{
+							sumWk += W[k].read(x, y);
+
+							auto pos = depthPoints[y*KDP->ColorDataWidth() + x];
+							if (!isinf(pos.X) && !isinf(pos.Y))
+							{
+								b += mDepthImages[curDepthImageIdx].read(pos.X,pos.Y);
+							}
+						}
+						auto xLeft = SuperresDepthImages[curDepthImageIdx].read(x - 1, y);
+						auto xUpper = SuperresDepthImages[curDepthImageIdx].read(x, y - 1);
+						auto xRight = prevData.read(x + 1, y);
+						auto xLower = prevData.read(x, y + 1);
+						SuperresDepthImages[curDepthImageIdx].write(x, y, (b+gamma*(xLeft+xUpper+xRight+xLower))/(sumWk+8*gamma));
+					}
+				}
 			} 
 			while (error > errorBound);
 		}
 		
-		return SuperresDepthImages;
+		auto Result = std::make_shared<RenderImage>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
+
+		std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
+		CM->MapColorFrameToDepthSpace(mDepthImages[0].width()*mDepthImages[0].height(), mDepthImages[0].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
+		
+		for (int y = 0;y < KDP->ColorDataHeight(); y++)
+		{
+			for (int x = 0;x < KDP->ColorDataWidth(); x++)
+			{
+				auto current = depthPoints[y*KDP->ColorDataWidth() + x];
+				if (!isinf(current.X) && current.X >= 0)
+				{
+					///@TODO FIX CONVERSION ERROR!!!!!!!!!!!!!!!!!!!!!!!! Somewhere...
+					//auto val = mDepthImages[0].read(current.X, current.Y) / 16;
+					//SuperresDepthImages[0].write(x, y, mDepthImages[0].read(current.X, current.Y));
+					//Result->writePixel(x, y, mDepthImages[0].read(x, y) / 16);
+					//Result->writePixel(x, y, mDepthImages[0].read(current.X, current.Y) / 16);
+					Result->writePixel(x, y, SuperresDepthImages[0].read(x, y));
+				}
+				//Result->writePixel(x, y, SuperresDepthImages[0].read(x, y));
+			}
+		}
+
+		Result->update();
+		return Result;
 	}
 
 	std::shared_ptr<RenderImage> calcDepthDeviation() const
 	{
-		auto DepthDeviation = std::make_shared<RenderImage>(512, 424);
+		auto DepthDeviation = std::make_shared<RenderImage>(mDepthImages[0].width(), mDepthImages[0].height());
 		for (int x = 0; x < DepthDeviation->width(); x++)
 		{
 			for (int y = 0; y < DepthDeviation->height(); y++)
 			{
-				auto reference = reinterpret_cast<UINT16*>((*mDepthImages.begin())->data);
+				auto reference = (mDepthImages.begin())->raw();
 				auto lastInChunk = mDepthImages.begin();
 				std::advance(lastInChunk, mChunkSize);
 
-				auto dev = std::accumulate(++mDepthImages.begin(), lastInChunk, 0, [&x, &y, &reference](int acc, const bgfx::Memory* image) {return acc + reference[512 * y + x] - reinterpret_cast<UINT16*>(image->data)[512 * y + x];}) / mDepthImages.size();
+				auto dev = std::accumulate(++mDepthImages.begin(), lastInChunk, 0, [&x, &y, &reference](int acc, Bgfx2DMemoryHelper<uint16_t> image) {return acc + reference[512 * y + x] - image.read(x,y);}) / mDepthImages.size();
 
 				DepthDeviation->writePixel(x, y, dev / 16);
 			}
@@ -697,7 +547,7 @@ int _main_(int _argc, char** _argv)
 		KinectDataProvider KDP;
 		
 		bool runningReconstruction = false;
-		ReconstructionState reconstruction(10, 22);
+		ReconstructionState reconstruction(10, 1);
 		
 		//assumption: tracking space is 10x10x8 (x,y,z) meters
 		constexpr unsigned int kinectSkeletonSpaceX = 10;
@@ -714,8 +564,11 @@ int _main_(int _argc, char** _argv)
 			yPlane(triplanarWidth, triplanarHeight),
 			zPlane(triplanarWidth, triplanarHeight);
 
-		bgfx::TextureHandle colorTexture = bgfx::createTexture2D(KDP.ColorDataWidth(), KDP.ColorDataHeight(), false, 1, bgfx::TextureFormat::RGBA8, BGFX_TEXTURE_NONE);
-		bgfx::TextureHandle depthRampTexture = bgfx::createTexture2D(KDP.DepthDataWidth(), KDP.DepthDataHeight(), false, 1, bgfx::TextureFormat::RGBA8, BGFX_TEXTURE_NONE);
+		std::shared_ptr<RenderImage> SResRes;
+
+		//bgfx::TextureHandle colorTexture = bgfx::createTexture2D(KDP.ColorDataWidth(), KDP.ColorDataHeight(), false, 1, bgfx::TextureFormat::RGBA8, BGFX_TEXTURE_NONE);
+		auto ColorImage = RenderImage(KDP.ColorDataWidth(), KDP.ColorDataHeight());
+		auto DepthRampImage = RenderImage(KDP.DepthDataWidth(), KDP.DepthDataHeight());
 
 		// Imgui.
 		imguiCreate();
@@ -741,9 +594,15 @@ int _main_(int _argc, char** _argv)
 					zPlane.clear();
 
 					// acquire latest data
-					auto LatestColorImage = KDP.LatestColorData();
-					auto ColorBuffer = bgfx::copy(LatestColorImage->data, LatestColorImage->size);
-
+					auto LatestColorImage = Bgfx2DMemoryHelper<RGBQUAD>(KDP.ColorDataWidth(), KDP.ColorDataHeight(), KDP.LatestColorData());
+					for (int y = 0; y < LatestColorImage.height(); y++)
+					{
+						for (int x = 0; x < LatestColorImage.width(); x++)
+						{
+							auto val = LatestColorImage.read(x, y);
+							ColorImage.writePixel(x, y, val.rgbBlue, val.rgbGreen, val.rgbRed, 255);
+						}
+					}
 					for (int bodyIndex = 0; bodyIndex < BODY_COUNT; ++bodyIndex)
 					{
 						IBody* body = KDP.LatestBodyData(bodyIndex);
@@ -834,17 +693,12 @@ int _main_(int _argc, char** _argv)
 								{
 									const int radius = 10; // radius in pixels
 									CoordinateMapper->MapCameraPointToColorSpace(joints[jointIndex].Position, &fragment);
-									auto nearestPixel = [&KDP](const int X, const int Y) -> int {return sizeof(RGBQUAD)*(Y*KDP.ColorDataWidth() + X);};
 									// draw circle
 									for (int y = std::max<int>(std::round(fragment.Y) - radius, 0); y < std::min<int>(KDP.ColorDataHeight(), std::round(fragment.Y) + radius); y++)
 									{
 										for (int x = std::max<int>(std::round(fragment.X) - radius, 0); x < std::min<int>(KDP.ColorDataWidth(), std::round(fragment.X) + radius); x++)
 										{
-											int pixel = nearestPixel(x, y);
-											ColorBuffer->data[pixel] = 255;
-											ColorBuffer->data[pixel + 1] = 0;
-											ColorBuffer->data[pixel + 2] = 0;
-											ColorBuffer->data[pixel + 3] = 255;
+											ColorImage.writePixel(x, y, 255, 0, 0, 255);
 										}
 									}
 								}
@@ -887,24 +741,21 @@ int _main_(int _argc, char** _argv)
 							zPlane.update();
 						}
 					}
-					bgfx::updateTexture2D(colorTexture, 0, 0, 0, 0, KDP.ColorDataWidth(), KDP.ColorDataHeight(), ColorBuffer);
+					ColorImage.update();
+					
 
-
-					auto LatestDepthBuffer = KDP.LatestDepthData();
+					auto LatestDepthBuffer = Bgfx2DMemoryHelper<uint16_t>(KDP.DepthDataWidth(), KDP.DepthDataHeight(), KDP.LatestDepthData());
 					// Convert D16 to RGBA8 (grey ramp)
-					auto FixedDepthBuffer = reinterpret_cast<UINT16*>(LatestDepthBuffer->data);
-					const bgfx::Memory* DepthImage = bgfx::alloc(KDP.DepthDataWidth()*KDP.DepthDataHeight() * 4);
-					for (int i = 0;i < LatestDepthBuffer->size / 2; i++)
+					for (int y = 0; y < LatestDepthBuffer.height(); y++)
 					{
-						for (int j = 0;j < 3; j++)
+						for (int x = 0;x < LatestDepthBuffer.width(); x++)
 						{
-							DepthImage->data[4 * i + j] = FixedDepthBuffer[i] / 16;
+							DepthRampImage.writePixel(x, y, LatestDepthBuffer.read(x,y) / 16 );
 						}
-						DepthImage->data[4 * i + 3] = 255;
 					}
-					bgfx::updateTexture2D(depthRampTexture, 0, 0, 0, 0, KDP.DepthDataWidth(), KDP.DepthDataHeight(), DepthImage);
-
-
+					DepthRampImage.update();
+					
+					 
 					if (runningReconstruction)
 					{
 						if (reconstruction.targetAngle() - 5. < bodyAngle && bodyAngle < reconstruction.targetAngle() + 5.)
@@ -912,13 +763,13 @@ int _main_(int _argc, char** _argv)
 							auto body = KDP.LatestBodyData(lastTrackedBody);
 							Joint joints[JointType_Count];
 							body->GetJoints(JointType_Count, joints);
-							reconstruction.feed(bgfx::copy(LatestColorImage->data, LatestColorImage->size)
-								, bgfx::copy(LatestDepthBuffer->data, LatestDepthBuffer->size)
+							reconstruction.feed(LatestColorImage.clone()
+								, LatestDepthBuffer.clone()
 								, joints);
 							static bool doOnce = true;
 							if (reconstruction.hasEnoughData() && doOnce)
 							{
-								reconstruction.reconstructAvatar(&KDP);
+								SResRes = reconstruction.reconstructAvatar(&KDP);
 								doOnce = false;
 							}
 						}
@@ -976,7 +827,7 @@ int _main_(int _argc, char** _argv)
 				{
 					ImGui::SetNextWindowSizeConstraints(ImVec2(400, 320), ImVec2(KDP.DepthDataWidth(), KDP.DepthDataHeight()));
 					ImGui::Begin("Depth Buffer");
-						ImGui::Image(depthRampTexture, ImGui::GetContentRegionAvail());
+						ImGui::Image(DepthRampImage.handle(), ImGui::GetContentRegionAvail());
 					ImGui::End();
 				}
 
@@ -984,7 +835,7 @@ int _main_(int _argc, char** _argv)
 				{
 					ImGui::SetNextWindowSizeConstraints(ImVec2(400, 320), ImVec2(KDP.ColorDataWidth(), KDP.ColorDataHeight()));
 					ImGui::Begin("Color Image");
-						ImGui::Image(colorTexture, ImGui::GetContentRegionAvail());
+						ImGui::Image(ColorImage.handle(), ImGui::GetContentRegionAvail());
 					ImGui::End();
 
 					ImGui::Begin("Color Image Settings");
@@ -1003,6 +854,14 @@ int _main_(int _argc, char** _argv)
 						ImGui::Image(yPlane.handle(), { Region.x / 2, Region.y / 2});
 						ImGui::NextColumn();
 						ImGui::Image(xPlane.handle(), { Region.x / 2, Region.y / 2});
+					ImGui::End();
+				}
+
+				if (SResRes)
+				{
+					ImGui::SetNextWindowSizeConstraints(ImVec2(400, 400), ImVec2(KDP.ColorDataWidth(), KDP.ColorDataHeight()));
+					ImGui::Begin("RESULT");
+						ImGui::Image(SResRes->handle(), ImGui::GetContentRegionAvail());
 					ImGui::End();
 				}
 
