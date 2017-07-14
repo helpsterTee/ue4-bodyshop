@@ -29,34 +29,37 @@ private:
 
 	IBody* bodies[BODY_COUNT] = { 0 };
 
+	const bgfx::Memory* indexBuffer = nullptr;
+	int indexBufferWidth = 0;
+	int indexBufferHeight = 0;
+
 public:
 	KinectDataProvider()
 	{
+		constexpr auto SourceTypes = FrameSourceTypes_Color | FrameSourceTypes_Depth | FrameSourceTypes_Body | FrameSourceTypes_BodyIndex;
+
 		// Grab reader
 		HRESULT hr = GetDefaultKinectSensor(sensor.address());
 		if (sensor.isset() || FAILED(hr))
 		{
 			throw std::runtime_error("Failed to acquire sensor.");
 		}
-		hr = sensor->Open();
-		if (FAILED(hr))
+		if (FAILED(sensor->Open()))
 		{
 			throw std::runtime_error("Failed to open sensor.");
 		}
-		hr = sensor->OpenMultiSourceFrameReader(FrameSourceTypes_Color | FrameSourceTypes_Depth | FrameSourceTypes_Body | FrameSourceTypes_BodyIndex, multiSourceReader.address());
-		if (FAILED(hr))
+		if (FAILED(sensor->OpenMultiSourceFrameReader(SourceTypes, multiSourceReader.address())))
 		{
 			throw std::runtime_error("Failed to open reader.");
 		}
-		hr = sensor->get_CoordinateMapper(coordinateMapper.address());
-		if (FAILED(hr))
+		if (FAILED(sensor->get_CoordinateMapper(coordinateMapper.address())))
 		{
 			throw std::runtime_error("Failed to grab coordinate mapper.");
 		}
 
 		// Create buffers
 		ComWrapper<IMultiSourceFrame> frame;
-		while ((hr = multiSourceReader->AcquireLatestFrame(frame.address())) == E_PENDING) {}
+		while ((hr = multiSourceReader->AcquireLatestFrame(frame.address())) == E_PENDING) {} // fix to acquire buffer
 		if (FAILED(hr))
 		{
 			throw std::runtime_error("Failed to grab initial frame.");
@@ -65,30 +68,25 @@ public:
 		// depth
 		{
 			ComWrapper<IDepthFrameReference> depthFrameRef;
-			hr = frame->get_DepthFrameReference(depthFrameRef.address());
-			if (FAILED(hr))
+			if (FAILED(frame->get_DepthFrameReference(depthFrameRef.address())))
 			{
 				throw std::runtime_error("Failed to grab initial depth frame reference.");
 			}
 			ComWrapper<IDepthFrame> depthFrame;
-			hr = depthFrameRef->AcquireFrame(depthFrame.address());
-			if (FAILED(hr))
+			if (FAILED(depthFrameRef->AcquireFrame(depthFrame.address())))
 			{
 				throw std::runtime_error("Failed to grab initial depth frame.");
 			}
 			ComWrapper<IFrameDescription> depthFrameDesc;
-			hr = depthFrame->get_FrameDescription(depthFrameDesc.address());
-			if (FAILED(hr))
+			if (FAILED(depthFrame->get_FrameDescription(depthFrameDesc.address())))
 			{
 				throw std::runtime_error("Failed to grab depth frame description.");
 			}
-			hr = depthFrameDesc->get_Width(&depthBufferWidth);
-			if (FAILED(hr))
+			if (FAILED(depthFrameDesc->get_Width(&depthBufferWidth)))
 			{
 				throw std::runtime_error("Failed to grab depth frame description.");
 			}
-			hr = depthFrameDesc->get_Height(&depthBufferHeight);
-			if (FAILED(hr))
+			if (FAILED(depthFrameDesc->get_Height(&depthBufferHeight)))
 			{
 				throw std::runtime_error("Failed to grab depth frame description.");
 			}
@@ -98,61 +96,80 @@ public:
 		// color
 		{
 			ComWrapper<IColorFrameReference> colorFrameRef;
-			hr = frame->get_ColorFrameReference(colorFrameRef.address());
-			if (FAILED(hr))
+			if (FAILED(frame->get_ColorFrameReference(colorFrameRef.address())))
 			{
 				throw std::runtime_error("Failed to grab initial color frame reference.");
 			}
 			ComWrapper<IColorFrame> colorFrame;
-			hr = colorFrameRef->AcquireFrame(colorFrame.address());
-			if (FAILED(hr))
+			if (FAILED(colorFrameRef->AcquireFrame(colorFrame.address())))
 			{
 				throw std::runtime_error("Failed to grab initial color frame.");
 			}
 			ComWrapper<IFrameDescription> colorFrameDesc;
-			hr = colorFrame->get_FrameDescription(colorFrameDesc.address());
-			if (FAILED(hr))
+			if (FAILED(colorFrame->get_FrameDescription(colorFrameDesc.address())))
 			{
 				throw std::runtime_error("Failed to grab color frame description.");
 			}
-			hr = colorFrameDesc->get_Width(&colorBufferWidth);
-			if (FAILED(hr))
+			if (FAILED(colorFrameDesc->get_Width(&colorBufferWidth)))
 			{
 				throw std::runtime_error("Failed to grab color frame description.");
 			}
-			hr = colorFrameDesc->get_Height(&colorBufferHeight);
-			if (FAILED(hr))
+			if (FAILED(colorFrameDesc->get_Height(&colorBufferHeight)))
 			{
 				throw std::runtime_error("Failed to grab color frame description.");
 			}
 			colorBuffer = bgfx::alloc(colorBufferWidth*colorBufferHeight*sizeof(RGBQUAD));
+		}
+
+		// index
+		{
+			ComWrapper<IBodyIndexFrameReference> indexFrameRef;
+			if (FAILED(frame->get_BodyIndexFrameReference(indexFrameRef.address())))
+			{
+				throw std::runtime_error("Failed to grab initial body index frame reference.");
+			}
+			ComWrapper<IBodyIndexFrame> indexFrame;
+			if (FAILED(indexFrameRef->AcquireFrame(indexFrame.address())))
+			{
+				throw std::runtime_error("Failed to grab initial color frame.");
+			}
+			ComWrapper<IFrameDescription> indexFrameDesc;
+			if (FAILED(indexFrame->get_FrameDescription(indexFrameDesc.address())))
+			{
+				throw std::runtime_error("Failed to grab index frame description.");
+			}
+			if (FAILED(indexFrameDesc->get_Width(&indexBufferWidth)))
+			{
+				throw std::runtime_error("Failed to grab color frame description.");
+			}
+			if (FAILED(indexFrameDesc->get_Height(&indexBufferHeight)))
+			{
+				throw std::runtime_error("Failed to grab color frame description.");
+			}
+			indexBuffer = bgfx::alloc(indexBufferWidth*indexBufferHeight*sizeof(BYTE));
 		}
 	}
 
 	bool RefreshData()
 	{
 		ComWrapper<IMultiSourceFrame> frame;
-		auto hr = multiSourceReader->AcquireLatestFrame(frame.address());
-		if (FAILED(hr))
+		if (FAILED(multiSourceReader->AcquireLatestFrame(frame.address())))
 		{
 			return false;
 		}
 		// depth
 		{
 			ComWrapper<IDepthFrameReference> depthFrameRef;
-			hr = frame->get_DepthFrameReference(depthFrameRef.address());
-			if (FAILED(hr))
+			if (FAILED(frame->get_DepthFrameReference(depthFrameRef.address())))
 			{
 				throw std::runtime_error("Failed to grab depth frame reference.");
 			}
 			ComWrapper<IDepthFrame> depthFrame;
-			hr = depthFrameRef->AcquireFrame(depthFrame.address());
-			if (FAILED(hr))
+			if (FAILED(depthFrameRef->AcquireFrame(depthFrame.address())))
 			{
 				throw std::runtime_error("Failed to grab depth frame.");
 			}
-			hr = depthFrame->CopyFrameDataToArray(depthBuffer->size/2, reinterpret_cast<UINT16*>(depthBuffer->data));
-			if (FAILED(hr))
+			if (FAILED(depthFrame->CopyFrameDataToArray(depthBuffer->size / 2, reinterpret_cast<UINT16*>(depthBuffer->data))))
 			{
 				throw std::runtime_error("Failed to copy depth data.");
 			}
@@ -160,19 +177,16 @@ public:
 		// color
 		{
 			ComWrapper<IColorFrameReference> colorFrameRef;
-			hr = frame->get_ColorFrameReference(colorFrameRef.address());
-			if (FAILED(hr))
+			if (FAILED(frame->get_ColorFrameReference(colorFrameRef.address())))
 			{
 				throw std::runtime_error("Failed to grab color frame reference.");
 			}
 			ComWrapper<IColorFrame> colorFrame;
-			hr = colorFrameRef->AcquireFrame(colorFrame.address());
-			if (FAILED(hr))
+			if (FAILED(colorFrameRef->AcquireFrame(colorFrame.address())))
 			{
 				throw std::runtime_error("Failed to grab color frame.");
 			}
-			hr = colorFrame->CopyConvertedFrameDataToArray(colorBuffer->size, reinterpret_cast<BYTE*>(colorBuffer->data), ColorImageFormat_Rgba);
-			if (FAILED(hr))
+			if (FAILED(colorFrame->CopyConvertedFrameDataToArray(colorBuffer->size, reinterpret_cast<BYTE*>(colorBuffer->data), ColorImageFormat_Rgba)))
 			{
 				throw std::runtime_error("Failed to copy color data.");
 			}
@@ -182,22 +196,39 @@ public:
 		// body
 		{
 			ComWrapper<IBodyFrameReference> bodyFrameRef;
-			hr = frame->get_BodyFrameReference(bodyFrameRef.address());
-			if (FAILED(hr))
+			if (FAILED(frame->get_BodyFrameReference(bodyFrameRef.address())))
 			{
 				throw std::runtime_error("Failed to grab body frame reference.");
 			}
 			ComWrapper<IBodyFrame> bodyFrame;
-			hr = bodyFrameRef->AcquireFrame(bodyFrame.address());
-			if (FAILED(hr))
+			if (FAILED(bodyFrameRef->AcquireFrame(bodyFrame.address())))
 			{
 				throw std::runtime_error("Failed to grab body frame.");
 			}
-			hr = bodyFrame->GetAndRefreshBodyData(_countof(bodies), bodies);  
-			if (FAILED(hr))
+			if (FAILED(bodyFrame->GetAndRefreshBodyData(_countof(bodies), bodies)))
 			{ 
 				throw std::runtime_error("Failed to grab body data."); 
 			}
+		}
+
+
+		// index
+		{
+			ComWrapper<IBodyIndexFrameReference> indexFrameRef;
+			if (FAILED(frame->get_BodyIndexFrameReference(indexFrameRef.address())))
+			{
+				throw std::runtime_error("Failed to grab body index frame reference.");
+			}
+			ComWrapper<IBodyIndexFrame> indexFrame;
+			if (FAILED(indexFrameRef->AcquireFrame(indexFrame.address())))
+			{
+				throw std::runtime_error("Failed to grab body index frame.");
+			}
+			if (FAILED(indexFrame->CopyFrameDataToArray(indexBuffer->size, reinterpret_cast<BYTE*>(indexBuffer->data))))
+			{
+				throw std::runtime_error("Failed to grab body data.");
+			}
+			
 		}
 
 		return true;
@@ -236,6 +267,21 @@ public:
 	const int DepthDataHeight() const
 	{
 		return this->depthBufferHeight;
+	}
+
+	const int IndexDataWidth() const
+	{
+		return this->indexBufferWidth;
+	}
+
+	const int IndexDataHeight() const
+	{
+		return this->indexBufferHeight;
+	}
+
+	const bgfx::Memory* LatestIndexData() const
+	{
+		return this->indexBuffer;
 	}
 
 	ICoordinateMapper* CoordinateMapper()
@@ -305,15 +351,37 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <numeric>
 #include <algorithm>
 
-#include <opencv2/superres.hpp>
-#include <eigen/Core>
+#include <Eigen/Core>
+#include <Eigen/Eigenvalues> 
 
 #include <iostream>
+
+#include <pcl/common/projection_matrix.h>
+#include <pcl/point_types.h>
+#include <pcl/registration/icp.h>
+#include <pcl/surface/poisson.h>
+#include <pcl/features/normal_3d_omp.h>
+#include <pcl/features/integral_image_normal.h>
+
+#include <pcl/visualization/cloud_viewer.h>
+
+#include <pcl/io/pcd_io.h>
+#include <pcl/io/ply_io.h>
+
+#include <opencv2/opencv.hpp>
+
+float angleForChunk(const int const current, const int total)
+{
+	return static_cast<int>(2 * current * 100. / total) % 100 - 50.;
+}
+
+//! @TODO refactor shit
 class ReconstructionState
 {
 private:
 	std::vector<Bgfx2DMemoryHelper<RGBQUAD>> mColorImages;
 	std::vector<Bgfx2DMemoryHelper<uint16_t>> mDepthImages;
+	std::vector<Bgfx2DMemoryHelper<uint8_t>> mIndexImages;
 	std::vector<Joint[JointType_Count]> mJointData;
 
 	const unsigned int mChunkSize;
@@ -321,6 +389,7 @@ private:
 
 	unsigned int mCurrentChunk = 0;
 	unsigned int mCurrentImageInChunk = 0;
+	
 
 public:
 	ReconstructionState(unsigned int chunkSize, unsigned int numChunks)
@@ -328,6 +397,7 @@ public:
 		, mChunkSize(chunkSize)
 		, mColorImages(chunkSize*numChunks)
 		, mDepthImages(chunkSize*numChunks)
+		, mIndexImages(chunkSize*numChunks)
 		, mJointData(chunkSize*numChunks)
 	{
 
@@ -339,7 +409,7 @@ public:
 		mCurrentImageInChunk = 0;
 	}
 
-	void feed(Bgfx2DMemoryHelper<RGBQUAD> colorImage, Bgfx2DMemoryHelper<uint16_t> depthImage, Joint joints[JointType_Count])
+	void feed(Bgfx2DMemoryHelper<RGBQUAD> colorImage, Bgfx2DMemoryHelper<uint16_t> depthImage, Bgfx2DMemoryHelper<uint8_t> indexImage, Joint joints[JointType_Count])
 	{
 		if(hasEnoughData())
 		{
@@ -349,6 +419,7 @@ public:
 		const auto index = mCurrentChunk*mChunkSize + mCurrentImageInChunk;
 		mColorImages[index] = colorImage;
 		mDepthImages[index] = depthImage;
+		mIndexImages[index] = indexImage;
 		for (int i = 0; i < JointType_Count;i++) 
 		{
 			mJointData[index][i] = joints[i];
@@ -363,7 +434,7 @@ public:
 
 	float targetAngle() const 
 	{
-		return static_cast<int>(2*mCurrentChunk * 100. / mNumChunks)%100  - 50.; // 100 degree from the front and 100 degree from the back...
+		return angleForChunk(mCurrentChunk, mNumChunks); // 100 degree from the front and 100 degree from the back...
 	}
 
 	bool hasEnoughData() const
@@ -374,25 +445,28 @@ public:
 	std::shared_ptr<RenderImage> reconstructAvatar(KinectDataProvider* KDP)
 	{
 		auto CM = KDP->CoordinateMapper();
-		std::vector<Bgfx2DMemoryHelper<uint16_t>> SuperresDepthImages(mNumChunks);
+		std::vector<Bgfx2DMemoryHelper<uint16_t>> superresDepthImages(mNumChunks);
 
 		std::vector<Bgfx2DMemoryHelper<float>> W(mNumChunks); // buffer for Wk
 		for (int i = 0;i < mNumChunks;i++)
 		{
 			W[i] = Bgfx2DMemoryHelper<float>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
 		}
-		
 
-		for (int curDepthImageIdx = 0; curDepthImageIdx < 1; curDepthImageIdx++)
+
+		for (int curDepthImageIdx = 0; curDepthImageIdx < superresDepthImages.size(); curDepthImageIdx++)
 		{
 			std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
 			CM->MapColorFrameToDepthSpace(mDepthImages[curDepthImageIdx].width()*mDepthImages[curDepthImageIdx].height(), mDepthImages[curDepthImageIdx].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
 
+			//@TODO local registration via optical flow
+
 			// superresolution
 			constexpr float errorBound = 0.005;
 			constexpr float gamma = 0.8;
+			constexpr float eigenvalueThreshold = 5.0;
 
-			SuperresDepthImages[curDepthImageIdx] = Bgfx2DMemoryHelper<uint16_t>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
+			superresDepthImages[curDepthImageIdx] = Bgfx2DMemoryHelper<uint16_t>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
 			// make an initial guess
 			for (int y = 0; y < KDP->ColorDataHeight(); y++)
 			{
@@ -401,15 +475,16 @@ public:
 					auto dp = depthPoints[y*KDP->ColorDataWidth() + x];
 					if (isinf(dp.X) || isinf(dp.Y))
 					{
-						SuperresDepthImages[curDepthImageIdx].write(x, y, 0);
+						superresDepthImages[curDepthImageIdx].write(x, y, 0);
 					}
 					else
 					{
-						SuperresDepthImages[curDepthImageIdx].write(x, y, mDepthImages[mChunkSize*curDepthImageIdx+mChunkSize/2].read(dp.X, dp.Y)/16);
+						superresDepthImages[curDepthImageIdx].write(x, y, mDepthImages[mChunkSize*curDepthImageIdx + mChunkSize / 2].read(dp.X, dp.Y) );
 					}
-				}				
+				}
 			}
 			// prepare W
+			
 			for (int k = 0;k < mNumChunks; k++)
 			{
 				for (int y = 1;y < KDP->ColorDataHeight() - 1; y++)
@@ -421,24 +496,24 @@ public:
 						{
 							sum += *reinterpret_cast<uint32_t*>(&mColorImages[curDepthImageIdx*mChunkSize + k].read(x, y));
 						}
-						W[k].write(x, y, (0xFFFFFF - (*reinterpret_cast<uint32_t*>(&mColorImages[curDepthImageIdx*mChunkSize + k].read(x, y)) - sum / mChunkSize))/ 0xFFFFFF);
+						W[k].write(x, y, (0xFFFFFF - (*reinterpret_cast<uint32_t*>(&mColorImages[curDepthImageIdx*mChunkSize + k].read(x, y)) - sum / mChunkSize)) / 0xFFFFFF);
 					}
 				}
 			}
-			//std::cout << "Starting approximation " << curDepthImageIdx << std::endl;
+
+			std::cout << "Starting approximation " << curDepthImageIdx << "/" << superresDepthImages.size() << std::endl;
 			// approximation with gauss-seidel
 			float error = 0;
-			do 
+			do
 			{
 				error = 0;
-				auto prevData = SuperresDepthImages[curDepthImageIdx].clone();
-				for (int y = 1;y < KDP->ColorDataHeight() - 1; y++)
+				auto prevData = superresDepthImages[curDepthImageIdx].clone();
+				for (int y = 2;y < KDP->ColorDataHeight() - 2; y++)
 				{
-					for (int x = 1;x < KDP->ColorDataWidth() - 1; x++)
+					for (int x = 2;x < KDP->ColorDataWidth() - 2; x++)
 					{
+
 						//first two loops give k
-						//auto superresData = reinterpret_cast<uint16_t*>(SuperresDepthImages[curDepthImageIdx]->data);
-						//auto previousSuperresData = reinterpret_cast<uint16_t*>(last->data);
 						auto sumWk = 0.;
 						auto b = 0.;
 						for (int k = 0;k < mNumChunks;k++)
@@ -448,45 +523,196 @@ public:
 							auto pos = depthPoints[y*KDP->ColorDataWidth() + x];
 							if (!isinf(pos.X) && !isinf(pos.Y))
 							{
-								b += mDepthImages[curDepthImageIdx].read(pos.X,pos.Y);
+								b += W[k].read(x, y)*mDepthImages[curDepthImageIdx].read(pos.X, pos.Y);
 							}
 						}
-						auto xLeft = SuperresDepthImages[curDepthImageIdx].read(x - 1, y);
-						auto xUpper = SuperresDepthImages[curDepthImageIdx].read(x, y - 1);
-						auto xRight = prevData.read(x + 1, y);
-						auto xLower = prevData.read(x, y + 1);
-						SuperresDepthImages[curDepthImageIdx].write(x, y, (b+gamma*(xLeft+xUpper+xRight+xLower))/(sumWk+8*gamma));
+						int sumNeighbourhood = 0;
+						// upper-left neighbourhood
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 2, y - 2) / sqrt(8);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 1, y - 2) / sqrt(5);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 0, y - 2) / sqrt(4);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x + 1, y - 2) / sqrt(5);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x + 2, y - 2) / sqrt(8);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 2, y - 1) / sqrt(2);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 1, y - 1) / sqrt(2);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 0, y - 1) / sqrt(1);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x + 1, y - 1) / sqrt(2);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x + 2, y - 1) / sqrt(5);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 2, y - 0) / sqrt(4);
+						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 1, y - 0) / sqrt(1);
+						// lower-right neighbourhood
+						sumNeighbourhood += prevData.read(x + 1, y - 0) / sqrt(2);
+						sumNeighbourhood += prevData.read(x + 2, y - 0) / sqrt(4);
+						sumNeighbourhood += prevData.read(x - 2, y + 1) / sqrt(5);
+						sumNeighbourhood += prevData.read(x - 1, y + 1) / sqrt(2);
+						sumNeighbourhood += prevData.read(x - 0, y + 1) / sqrt(1);
+						sumNeighbourhood += prevData.read(x + 1, y + 1) / sqrt(2);
+						sumNeighbourhood += prevData.read(x + 2, y + 1) / sqrt(5);
+						sumNeighbourhood += prevData.read(x - 2, y + 2) / sqrt(8);
+						sumNeighbourhood += prevData.read(x - 1, y + 2) / sqrt(5);
+						sumNeighbourhood += prevData.read(x - 0, y + 2) / sqrt(4);
+						sumNeighbourhood += prevData.read(x + 1, y + 2) / sqrt(5);
+						sumNeighbourhood += prevData.read(x + 2, y + 2) / sqrt(8);
+
+						//SuperresDepthImages[curDepthImageIdx].write(x, y, (b + gamma*sumNeighbourhood) / (sumWk + 48 * gamma));
+						superresDepthImages[curDepthImageIdx].write(x, y, (b + gamma*sumNeighbourhood) / (sumWk + 48 * gamma));
 					}
 				}
-			} 
-			while (error > errorBound);
-		}
-		
-		auto Result = std::make_shared<RenderImage>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
+			} while (error > errorBound);
 
-		std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
-		CM->MapColorFrameToDepthSpace(mDepthImages[0].width()*mDepthImages[0].height(), mDepthImages[0].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
+			std::cout << "Finished approximation " << curDepthImageIdx+1 << "/" << superresDepthImages.size() << std::endl;
 		
-		for (int y = 0;y < KDP->ColorDataHeight(); y++)
+		}
+
+		// segmentation
+		std::cout << "Starting segmentation" << std::endl;
 		{
-			for (int x = 0;x < KDP->ColorDataWidth(); x++)
+			std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
+			for (int curDepthImageIdx = 0; curDepthImageIdx < superresDepthImages.size(); curDepthImageIdx++)
 			{
-				auto current = depthPoints[y*KDP->ColorDataWidth() + x];
-				if (!isinf(current.X) && current.X >= 0)
+				const auto index = curDepthImageIdx*mChunkSize + mChunkSize / 2;
+				CM->MapColorFrameToDepthSpace(mDepthImages[index].width()*mDepthImages[index].height(), mDepthImages[index].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
+
+				// create silhouette
+				cv::Mat cvImage(KDP->ColorDataHeight(), KDP->ColorDataWidth(), CV_16UC1);
+				for (int y = 0;y < KDP->ColorDataHeight(); y++)
 				{
-					///@TODO FIX CONVERSION ERROR!!!!!!!!!!!!!!!!!!!!!!!! Somewhere...
-					//auto val = mDepthImages[0].read(current.X, current.Y) / 16;
-					//SuperresDepthImages[0].write(x, y, mDepthImages[0].read(current.X, current.Y));
-					//Result->writePixel(x, y, mDepthImages[0].read(x, y) / 16);
-					//Result->writePixel(x, y, mDepthImages[0].read(current.X, current.Y) / 16);
-					Result->writePixel(x, y, SuperresDepthImages[0].read(x, y));
+					for (int x = 0;x < KDP->ColorDataWidth(); x++)
+					{
+						auto dp = depthPoints[y*KDP->ColorDataWidth() + x];
+						cvImage.at<uint16_t>(y, x) = 0;
+						for (auto &indexImage : mIndexImages)
+						{
+							if (dp.X > 0 && indexImage.read(dp.X, dp.Y) < 6)
+							{
+								cvImage.at<uint16_t>(y, x) = superresDepthImages[curDepthImageIdx].read(x, y);
+							}
+						}
+						//cvImage.at<uint16_t>(y, x) = superresDepthImages[i].read(x, y);
+					}
 				}
-				//Result->writePixel(x, y, SuperresDepthImages[0].read(x, y));
+
+				// save superres images to file
+				std::string filename = std::to_string(curDepthImageIdx);
+				filename += "-angle";
+				filename += std::to_string(angleForChunk(curDepthImageIdx, mNumChunks));
+				filename += ".png";
+				try {
+					cv::imwrite(filename.c_str(), cvImage);
+					std::cout << "Successfully saved superres data to" << filename << std::endl;
+				}
+				catch (std::runtime_error& ex) {
+					std::cout << "Exception converting image to PNG format: " << ex.what() << std::endl;
+					continue;
+				}
 			}
 		}
+		std::cout << "Finished segmentation" << std::endl;
 
-		Result->update();
-		return Result;
+		// generate point clouds
+		std::cout << "Starting point cloud generation" << std::endl;
+		std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr> pointClouds(superresDepthImages.size());
+		{
+			std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
+			std::unique_ptr<CameraSpacePoint[]> cameraPoints(new CameraSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<CameraSpacePoint[]>());
+			for (int curDepthImageIdx = 0; curDepthImageIdx < superresDepthImages.size(); curDepthImageIdx++)
+			{
+				const auto index = curDepthImageIdx*mChunkSize + mChunkSize / 2;
+				pointClouds[curDepthImageIdx] = pcl::PointCloud<pcl::PointXYZRGB>::Ptr(new pcl::PointCloud<pcl::PointXYZRGB>());
+				CM->MapColorFrameToDepthSpace(mDepthImages[index].width()*mDepthImages[index].height(), mDepthImages[index].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
+				CM->MapDepthFrameToCameraSpace(superresDepthImages[curDepthImageIdx].width()*superresDepthImages[curDepthImageIdx].height(), superresDepthImages[curDepthImageIdx].raw(), superresDepthImages[curDepthImageIdx].width()*superresDepthImages[curDepthImageIdx].height(), cameraPoints.get());
+			
+				for (int y = 0;y < KDP->ColorDataHeight(); y++)
+				{
+					for (int x = 0;x < KDP->ColorDataWidth(); x++)
+					{
+						auto dp = depthPoints[y*KDP->ColorDataWidth() + x];
+						//for (auto &indexImage : mIndexImages) 
+						{
+							if (!isinf(dp.X) /* && indexImage.read(dp.X, dp.Y) != 0xff */)
+							{
+								auto color = mColorImages[index].read(x, y);
+								pcl::PointXYZRGB p;
+								p.x = x;
+								p.y = y;
+								p.z = superresDepthImages[curDepthImageIdx].read(x, y);
+								//p.z = mDepthImages[index].read(dp.X, dp.Y);
+								p.r = color.rgbRed;
+								p.g = color.rgbBlue;
+								p.b = color.rgbGreen;
+								pointClouds[curDepthImageIdx]->push_back(p);
+							}
+						}
+					}
+				}
+				
+				/*
+				for (int pointIndex = 0; pointIndex < superresDepthImages[0].width()*superresDepthImages[0].height(); pointIndex++)
+				{
+					CameraSpacePoint p = cameraPoints[pointIndex];
+					if (p.Z <= 5.) // only map close points
+					{
+						pointClouds[i]->push_back({ p.X, p.Y, p.Z });
+					}
+					
+				}
+				*/
+			}
+		}
+		std::cout << "Finished point cloud generation" << std::endl;
+
+		pcl::visualization::PCLVisualizer viewer("PCL Viewer");
+		viewer.setBackgroundColor(0.0, 0.0, 0.5);
+		viewer.addPointCloud<pcl::PointXYZRGB>(pointClouds[0]);
+		while (!viewer.wasStopped())
+		{
+			viewer.spinOnce();
+		}
+		/*
+		std::cout << "Starting normal estimation" << std::endl;
+		pcl::NormalEstimationOMP<pcl::PointXYZ, pcl::Normal> neomp;
+		neomp.setNumberOfThreads(8);
+		neomp.setRadiusSearch(0.1);
+		neomp.setInputCloud(pointClouds[0]);
+		Eigen::Vector4f centroid;
+		pcl::compute3DCentroid(*pointClouds[0], centroid);
+		neomp.setViewPoint(centroid[0], centroid[1], centroid[2]);
+		pcl::PointCloud<pcl::Normal>::Ptr cloud_normals(new pcl::PointCloud<pcl::Normal>());
+		neomp.compute(*cloud_normals);
+		for (size_t i = 0; i < cloud_normals->size(); ++i) {
+			cloud_normals->points[i].normal_x *= -1;
+			cloud_normals->points[i].normal_y *= -1;
+			cloud_normals->points[i].normal_z *= -1;
+		}
+		std::cout << "Finished normal estimation" << std::endl;
+		*/
+		/*
+		std::cout << "Starting normal estimation" << std::endl;
+		pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
+		pcl::IntegralImageNormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
+		ne.setNormalEstimationMethod(ne.AVERAGE_3D_GRADIENT);
+		ne.setMaxDepthChangeFactor(0.02f);
+		ne.setNormalSmoothingSize(10.0f);
+		ne.setInputCloud(cloud);
+		ne.compute(*normals);
+		std::cout << "Finished normal estimation" << std::endl;
+		*/
+		/*
+		pcl::PointCloud<pcl::PointNormal>::Ptr cloud_smoothed_normals(new pcl::PointCloud<pcl::PointNormal>());
+		pcl::concatenateFields(*pointClouds[0], *cloud_normals, *cloud_smoothed_normals);
+
+		std::cout << "Starting poisson reconstruction" << std::endl;
+		pcl::Poisson<pcl::PointNormal> poisson;
+		poisson.setDepth(9);
+		poisson.setInputCloud(cloud_smoothed_normals);
+		poisson.setInputCloud(pointClouds[0]);
+		pcl::PolygonMesh mesh;
+		poisson.reconstruct(mesh);
+		std::cout << "Finished poisson reconstruction" << std::endl;
+
+		pcl::io::savePLYFile("testmesh.ply", mesh);
+		*/
+		return std::make_shared<RenderImage>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
 	}
 
 	std::shared_ptr<RenderImage> calcDepthDeviation() const
@@ -765,6 +991,7 @@ int _main_(int _argc, char** _argv)
 							body->GetJoints(JointType_Count, joints);
 							reconstruction.feed(LatestColorImage.clone()
 								, LatestDepthBuffer.clone()
+								, Bgfx2DMemoryHelper<uint8_t>(KDP.IndexDataWidth(), KDP.IndexDataHeight(), KDP.LatestIndexData()).clone()
 								, joints);
 							static bool doOnce = true;
 							if (reconstruction.hasEnoughData() && doOnce)

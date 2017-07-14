@@ -92,12 +92,16 @@ find_package( OpenCV REQUIRED )
 find_package( Eigen3 REQUIRED )
 include_directories(${EIGEN3_INCLUDE_DIR})
 
+# ------------------- PCL ---------------------- #
+find_package(PCL 1.7 REQUIRED COMPONENTS common console features io registration surface visualization)
+link_directories(${PCL_LIBRARY_DIRS})
+add_definitions(${PCL_DEFINITIONS})
 
 # ------------ put it all together ------------- #
 target_include_directories(${PROJECT_NAME}
-    PUBLIC ${BX_DIR}/include ${BGFX_DIR}/include ${BGFX_COMMON_DIR} ${KINECT2_DIR}/inc
+    PUBLIC ${BX_DIR}/include ${BGFX_DIR}/include ${BGFX_COMMON_DIR} ${KINECT2_DIR}/inc ${PCL_INCLUDE_DIRS}
 )
 
 target_link_libraries(${PROJECT_NAME}
-    PUBLIC ${BX_LIB} ${BGFX_LIB} ${BGFX_COMMON_LIB} ${KINECT2_LIB} ib-compress ocornut-imgui ${OpenCV_LIBS}
+    PUBLIC ${BX_LIB} ${BGFX_LIB} ${BGFX_COMMON_LIB} ${KINECT2_LIB} ib-compress ocornut-imgui ${OpenCV_LIBS} ${PCL_LIBRARIES}
 )
