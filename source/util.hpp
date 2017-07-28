@@ -200,7 +200,7 @@ public:
 
 
 	//
-	T read(int x, int y)
+	T read(int x, int y) const
 	{
 		return reinterpret_cast<T*>(mMem->data)[y*w + x];
 	}
@@ -214,7 +214,7 @@ public:
 	}
 
 
-	Bgfx2DMemoryHelper clone()
+	Bgfx2DMemoryHelper clone() const
 	{
 		return Bgfx2DMemoryHelper(w,h,bgfx::copy(mMem->data,mMem->size));
 	}

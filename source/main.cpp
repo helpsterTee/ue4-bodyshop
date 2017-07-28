@@ -364,16 +364,45 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <pcl/features/integral_image_normal.h>
 
 #include <pcl/visualization/cloud_viewer.h>
+#include <pcl/filters/radius_outlier_removal.h>
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/io/ply_io.h>
 
 #include <opencv2/opencv.hpp>
+#include <opencv2/optflow.hpp>
 
 float angleForChunk(const int const current, const int total)
 {
 	return static_cast<int>(2 * current * 100. / total) % 100 - 50.;
 }
+
+template<typename T>
+void copyToCvMat(Bgfx2DMemoryHelper<T>& internalImage, cv::Mat& cvImage)
+{
+	for (int y = 0; y < internalImage.height(); y++)
+	{
+		for (int x = 0; x < internalImage.width(); x++)
+		{
+			cvImage.at<T>(y, x) = internalImage.read(x, y);
+		}
+	}
+}
+
+void copyToCvMat(Bgfx2DMemoryHelper<RGBQUAD>& internalImage, cv::Mat& cvImage)
+{
+	for (int y = 0; y < internalImage.height(); y++)
+	{
+		for (int x = 0; x < internalImage.width(); x++)
+		{
+			cvImage.at<cv::Vec3b>(y, x)[0] = internalImage.read(x, y).rgbGreen;
+			cvImage.at<cv::Vec3b>(y, x)[1] = internalImage.read(x, y).rgbBlue;
+			cvImage.at<cv::Vec3b>(y, x)[2] = internalImage.read(x, y).rgbRed;
+		}
+	}
+}
+
+//copyToInternalImage()
 
 //! @TODO refactor shit
 class ReconstructionState
@@ -389,7 +418,7 @@ private:
 
 	unsigned int mCurrentChunk = 0;
 	unsigned int mCurrentImageInChunk = 0;
-	
+
 
 public:
 	ReconstructionState(unsigned int chunkSize, unsigned int numChunks)
@@ -442,135 +471,483 @@ public:
 		return mCurrentChunk == mNumChunks;
 	}
 
+
 	std::shared_ptr<RenderImage> reconstructAvatar(KinectDataProvider* KDP)
 	{
 		auto CM = KDP->CoordinateMapper();
-		std::vector<Bgfx2DMemoryHelper<uint16_t>> superresDepthImages(mNumChunks);
+		
+		// compute body hull
+		std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
+		std::unique_ptr<cv::Mat[]> bodyHull(new cv::Mat[mNumChunks], std::default_delete<cv::Mat[]>());
+		std::unique_ptr<std::pair<cv::Point, cv::Point>[]> boundaries(new std::pair<cv::Point, cv::Point>[mNumChunks], std::default_delete<std::pair<cv::Point, cv::Point>[]>());
 
-		std::vector<Bgfx2DMemoryHelper<float>> W(mNumChunks); // buffer for Wk
-		for (int i = 0;i < mNumChunks;i++)
+		for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
 		{
-			W[i] = Bgfx2DMemoryHelper<float>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
+			// init
+			bodyHull[curChunkIdx] = cv::Mat(KDP->ColorDataHeight(), KDP->ColorDataWidth(), CV_8U);
+			for (int y = 0;y < KDP->ColorDataHeight(); y++)
+			{
+				for (int x = 0;x < KDP->ColorDataWidth(); x++)
+				{
+					bodyHull[curChunkIdx].at<byte>(y, x) = false;
+				}
+			}
+
+			// body hull = union over all index images
+			for (int indexImageIdx = curChunkIdx*mChunkSize; indexImageIdx < curChunkIdx*mChunkSize + mChunkSize; indexImageIdx++)
+			{
+				CM->MapColorFrameToDepthSpace(KDP->DepthDataWidth()*KDP->DepthDataHeight(), mDepthImages[indexImageIdx].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
+
+				for (int y = 0;y < KDP->ColorDataHeight(); y++)
+				{
+					for (int x = 0;x < KDP->ColorDataWidth(); x++)
+					{
+						// Check whenether the point belongs to the body
+						auto dp = depthPoints[y*KDP->ColorDataWidth() + x];
+						if (!isinf(dp.X) && mIndexImages[indexImageIdx].read(dp.X, dp.Y) != 0xff)
+						{
+							bodyHull[curChunkIdx].at<byte>(y, x) = true;
+						}
+					}
+				}
+			}
+
+			// make it slightly bigger
+			const auto erosion_size = 2;
+			const auto dilatation_size = 4;
+			cv::Mat erosionElement = cv::getStructuringElement(cv::MORPH_ELLIPSE,
+				cv::Size(2 * erosion_size + 1, 2 * erosion_size + 1),
+				cv::Point(erosion_size, erosion_size));
+			cv::Mat dilatationElement = cv::getStructuringElement(cv::MORPH_ELLIPSE,
+				cv::Size(2 * erosion_size + 1, 2 * dilatation_size + 1),
+				cv::Point(erosion_size, erosion_size));
+			cv::erode(bodyHull[curChunkIdx], bodyHull[curChunkIdx], erosionElement);
+			cv::dilate(bodyHull[curChunkIdx], bodyHull[curChunkIdx], dilatationElement);
+
+			// compute bounding box
+			boundaries[curChunkIdx].first = cv::Point(KDP->ColorDataHeight(), KDP->ColorDataWidth());
+			boundaries[curChunkIdx].second = cv::Point(0, 0);
+			for (int y = 0;y < KDP->ColorDataHeight(); y++)
+			{
+				for (int x = 0;x < KDP->ColorDataWidth(); x++)
+				{
+					if (bodyHull[curChunkIdx].at<byte>(y, x))
+					{
+						boundaries[curChunkIdx].first.x = std::min(boundaries[curChunkIdx].first.x, x);
+						boundaries[curChunkIdx].first.y = std::min(boundaries[curChunkIdx].first.y, y);
+						boundaries[curChunkIdx].second.x = std::max(boundaries[curChunkIdx].second.x, x);
+						boundaries[curChunkIdx].second.y = std::max(boundaries[curChunkIdx].second.y, y);
+					}
+				}
+			}
+
+			// save to file
+			std::string filename = "body_hull-";
+			filename += std::to_string(curChunkIdx + 1);
+			filename += ".png";
+			try {
+				cv::imwrite(filename.c_str(), bodyHull[curChunkIdx]);
+				std::cout << "Successfully saved body hull data to " << filename << std::endl;
+			}
+			catch (std::runtime_error& ex) {
+				std::cout << "Exception converting image to PNG format: " << ex.what() << std::endl;
+				continue;
+			}
 		}
 
-
-		for (int curDepthImageIdx = 0; curDepthImageIdx < superresDepthImages.size(); curDepthImageIdx++)
+		// preprocess data	
+		std::vector<cv::Mat> superresDepthImages(mNumChunks);
+		for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
 		{
-			std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
-			CM->MapColorFrameToDepthSpace(mDepthImages[curDepthImageIdx].width()*mDepthImages[curDepthImageIdx].height(), mDepthImages[curDepthImageIdx].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
+			const auto bbLengthX = boundaries[curChunkIdx].second.x - boundaries[curChunkIdx].first.x + 1;
+			const auto bbLengthY = boundaries[curChunkIdx].second.y - boundaries[curChunkIdx].first.y + 1;
 
-			//@TODO local registration via optical flow
+			CM->MapColorFrameToDepthSpace(KDP->DepthDataWidth()*KDP->DepthDataHeight(), mDepthImages[curChunkIdx].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
+			const auto middleImageIdx = curChunkIdx*mChunkSize + mChunkSize / 2.;
 
-			// superresolution
-			constexpr float errorBound = 0.005;
-			constexpr float gamma = 0.8;
-			constexpr float eigenvalueThreshold = 5.0;
-
-			superresDepthImages[curDepthImageIdx] = Bgfx2DMemoryHelper<uint16_t>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
-			// make an initial guess
-			for (int y = 0; y < KDP->ColorDataHeight(); y++)
+			// crop away unneeded data
+			std::vector<cv::Mat> cvColorImages(mChunkSize);
+			std::vector<cv::Mat> cvDepthImages(mChunkSize);
+			for (int i = 0;i < mChunkSize;i++)
 			{
-				for (int x = 0; x < KDP->ColorDataWidth(); x++)
+				const auto seriesImageIdx = curChunkIdx*mChunkSize + i;
+				CM->MapColorFrameToDepthSpace(KDP->DepthDataWidth()*KDP->DepthDataHeight(), mDepthImages[seriesImageIdx].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
+
+				cvColorImages[i] = cv::Mat(bbLengthY, bbLengthX, CV_8UC3);
+				cvDepthImages[i] = cv::Mat(bbLengthY, bbLengthX, CV_16U);
+				for (int y = boundaries[curChunkIdx].first.y; y <= boundaries[curChunkIdx].second.y; y++)
 				{
-					auto dp = depthPoints[y*KDP->ColorDataWidth() + x];
-					if (isinf(dp.X) || isinf(dp.Y))
+					for (int x = boundaries[curChunkIdx].first.x; x <= boundaries[curChunkIdx].second.x; x++)
 					{
-						superresDepthImages[curDepthImageIdx].write(x, y, 0);
-					}
-					else
-					{
-						superresDepthImages[curDepthImageIdx].write(x, y, mDepthImages[mChunkSize*curDepthImageIdx + mChunkSize / 2].read(dp.X, dp.Y) );
-					}
-				}
-			}
-			// prepare W
-			
-			for (int k = 0;k < mNumChunks; k++)
-			{
-				for (int y = 1;y < KDP->ColorDataHeight() - 1; y++)
-				{
-					for (int x = 1;x < KDP->ColorDataWidth() - 1; x++)
-					{
-						int sum = 0;
-						for (int ks = 0;ks < mChunkSize;ks++)
+						const auto xcv = x - boundaries[curChunkIdx].first.x;
+						const auto ycv = y - boundaries[curChunkIdx].first.y;
+						auto dp = depthPoints[y*KDP->ColorDataWidth() + x];
+
+						cvColorImages[i].at<cv::Vec3b>(ycv, xcv)[0] = 0;
+						cvColorImages[i].at<cv::Vec3b>(ycv, xcv)[1] = 0;
+						cvColorImages[i].at<cv::Vec3b>(ycv, xcv)[2] = 0;
+						cvDepthImages[i].at<uint16_t>(ycv, xcv) = 0;
+
+						if (bodyHull[curChunkIdx].at<byte>(y, x))
 						{
-							sum += *reinterpret_cast<uint32_t*>(&mColorImages[curDepthImageIdx*mChunkSize + k].read(x, y));
-						}
-						W[k].write(x, y, (0xFFFFFF - (*reinterpret_cast<uint32_t*>(&mColorImages[curDepthImageIdx*mChunkSize + k].read(x, y)) - sum / mChunkSize)) / 0xFFFFFF);
-					}
-				}
-			}
-
-			std::cout << "Starting approximation " << curDepthImageIdx << "/" << superresDepthImages.size() << std::endl;
-			// approximation with gauss-seidel
-			float error = 0;
-			do
-			{
-				error = 0;
-				auto prevData = superresDepthImages[curDepthImageIdx].clone();
-				for (int y = 2;y < KDP->ColorDataHeight() - 2; y++)
-				{
-					for (int x = 2;x < KDP->ColorDataWidth() - 2; x++)
-					{
-
-						//first two loops give k
-						auto sumWk = 0.;
-						auto b = 0.;
-						for (int k = 0;k < mNumChunks;k++)
-						{
-							sumWk += W[k].read(x, y);
-
-							auto pos = depthPoints[y*KDP->ColorDataWidth() + x];
-							if (!isinf(pos.X) && !isinf(pos.Y))
+							auto color = mColorImages[seriesImageIdx].read(x, y);
+							cvColorImages[i].at<cv::Vec3b>(ycv, xcv)[0] = color.rgbGreen;
+							cvColorImages[i].at<cv::Vec3b>(ycv, xcv)[1] = color.rgbBlue;
+							cvColorImages[i].at<cv::Vec3b>(ycv, xcv)[2] = color.rgbRed;
+							if (!isinf(dp.X))
 							{
-								b += W[k].read(x, y)*mDepthImages[curDepthImageIdx].read(pos.X, pos.Y);
+								cvDepthImages[i].at<uint16_t>(ycv, xcv) = mDepthImages[seriesImageIdx].read(dp.X, dp.Y);
 							}
 						}
-						int sumNeighbourhood = 0;
-						// upper-left neighbourhood
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 2, y - 2) / sqrt(8);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 1, y - 2) / sqrt(5);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 0, y - 2) / sqrt(4);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x + 1, y - 2) / sqrt(5);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x + 2, y - 2) / sqrt(8);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 2, y - 1) / sqrt(2);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 1, y - 1) / sqrt(2);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 0, y - 1) / sqrt(1);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x + 1, y - 1) / sqrt(2);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x + 2, y - 1) / sqrt(5);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 2, y - 0) / sqrt(4);
-						sumNeighbourhood += superresDepthImages[curDepthImageIdx].read(x - 1, y - 0) / sqrt(1);
-						// lower-right neighbourhood
-						sumNeighbourhood += prevData.read(x + 1, y - 0) / sqrt(2);
-						sumNeighbourhood += prevData.read(x + 2, y - 0) / sqrt(4);
-						sumNeighbourhood += prevData.read(x - 2, y + 1) / sqrt(5);
-						sumNeighbourhood += prevData.read(x - 1, y + 1) / sqrt(2);
-						sumNeighbourhood += prevData.read(x - 0, y + 1) / sqrt(1);
-						sumNeighbourhood += prevData.read(x + 1, y + 1) / sqrt(2);
-						sumNeighbourhood += prevData.read(x + 2, y + 1) / sqrt(5);
-						sumNeighbourhood += prevData.read(x - 2, y + 2) / sqrt(8);
-						sumNeighbourhood += prevData.read(x - 1, y + 2) / sqrt(5);
-						sumNeighbourhood += prevData.read(x - 0, y + 2) / sqrt(4);
-						sumNeighbourhood += prevData.read(x + 1, y + 2) / sqrt(5);
-						sumNeighbourhood += prevData.read(x + 2, y + 2) / sqrt(8);
-
-						//SuperresDepthImages[curDepthImageIdx].write(x, y, (b + gamma*sumNeighbourhood) / (sumWk + 48 * gamma));
-						superresDepthImages[curDepthImageIdx].write(x, y, (b + gamma*sumNeighbourhood) / (sumWk + 48 * gamma));
 					}
 				}
-			} while (error > errorBound);
+				{
+					std::string filename = "raw_color";
+					filename += std::to_string(seriesImageIdx + 1);
+					filename += ".png";
+					try {
+						cv::imwrite(filename.c_str(), cvColorImages[i]);
+						std::cout << "Successfully saved aligned data to " << filename << std::endl;
+					}
+					catch (std::runtime_error& ex) {
+						std::cout << "Exception converting image to PNG format: " << ex.what() << std::endl;
+						continue;
+					}
+				}
+				{
+					std::string filename = "raw_depth";
+					filename += std::to_string(seriesImageIdx + 1);
+					filename += ".png";
+					try {
+						cv::imwrite(filename.c_str(), cvDepthImages[i]);
+						std::cout << "Successfully saved aligned data to " << filename << std::endl;
+					}
+					catch (std::runtime_error& ex) {
+						std::cout << "Exception converting image to PNG format: " << ex.what() << std::endl;
+						continue;
+					}
+				}
+			}
 
-			std::cout << "Finished approximation " << curDepthImageIdx+1 << "/" << superresDepthImages.size() << std::endl;
-		
+			/*
+			//remove the background
+			for (int y = 0;y < KDP->ColorDataHeight(); y++)
+			{
+				for (int x = 0;x < KDP->ColorDataWidth(); x++)
+				{
+					if (!(boundaries[curChunkIdx].first.x <= x && x <= boundaries[curChunkIdx].second.x 
+						&& boundaries[curChunkIdx].first.y <= y && y <= boundaries[curChunkIdx].second.y))
+					{
+						for (int i = curChunkIdx*mChunkSize;i < (curChunkIdx + 1)*mChunkSize; i++)
+						{
+							mColorImages[i].write(x, y, { 0, 0, 0 });
+						}
+					}
+				}
+			}
+			*/
+
+			// compute alignments
+			std::cout << "Aligning images in chunk " << curChunkIdx+1 << "/" << mNumChunks << std::endl;
+			//cv::Mat cvMiddleColorImage = cv::Mat(KDP->ColorDataHeight(), KDP->ColorDataWidth(), CV_8UC3);
+			//copyToCvMat(mColorImages[middleImageIdx], cvMiddleColorImage);
+
+			//std::unique_ptr<cv::Mat[]> flowToMiddleFrames(new cv::Mat[mNumChunks], std::default_delete<cv::Mat[]>());
+
+			for (int chunkImageIdx = 0; chunkImageIdx < mChunkSize; chunkImageIdx++)
+			{
+				if (chunkImageIdx == mChunkSize / 2) { continue; } // skip self
+
+				//cv::Mat cvCurrentColorImage = cv::Mat(KDP->ColorDataHeight(), KDP->ColorDataWidth(), CV_8UC3);
+				//copyToCvMat(mColorImages[chunkImageIdx], cvCurrentColorImage);
+				//flowToMiddleFrames[chunkImageIdx] = cv::Mat();
+				//cv::optflow::calcOpticalFlowSF(cvColorImages[chunkImageIdx], cvColorImages[mChunkSize/2], flowToMiddleFrames[chunkImageIdx], 3, 2, 4);
+
+				/*
+				// Convert image to grayscale
+				cv::Mat cvCurrentImage = cv::Mat(KDP->DepthDataHeight(), KDP->DepthDataWidth(), CV_16U);
+				copyToCvMat(mDepthImages[chunkImageIdx], cvCurrentImage);
+				cv::Mat cvCurrentImageGray = cv::Mat(KDP->DepthDataHeight(), KDP->DepthDataWidth(), CV_16U);
+				cvCurrentImage.copyTo(cvCurrentImageGray);
+				cvCurrentImageGray.convertTo(cvCurrentImageGray, CV_8U, 1. / 256.);
+
+				cv::Mat warp_matrix = cv::Mat::eye(2, 3, CV_32F);
+				int number_of_iterations = 500;
+				double termination_eps = 1e-6;
+				cv::TermCriteria criteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, number_of_iterations, termination_eps);
+
+				findTransformECC(
+					cvCurrentImageGray,
+					cvMiddleDepthImageGray,
+					warp_matrix,
+					cv::MOTION_EUCLIDEAN,
+					criteria
+					);
+				cv::Mat cvCurrentImageAligned;
+				warpAffine(cvCurrentImage, cvCurrentImageAligned, warp_matrix, cvCurrentImage.size(), cv::INTER_LINEAR + cv::WARP_INVERSE_MAP);
+
+				std::string filename = std::to_string(curDepthImageIdx + 1);
+				filename += "-aligned";
+				filename += std::to_string(chunkImageIdx + 1);
+				filename += ".png";
+				try {
+					cv::imwrite(filename.c_str(), cvCurrentImageAligned);
+					std::cout << "Successfully saved aligned data to " << filename << std::endl;
+				}
+				catch (std::runtime_error& ex) {
+					std::cout << "Exception converting image to PNG format: " << ex.what() << std::endl;
+					continue;
+				}
+				*/
+			}
+			/*
+			std::shared_ptr<RenderImage> color0 = std::make_shared<RenderImage>(mColorImages[0].width(), mColorImages[0].height());
+			for (int y = 0;y < mColorImages[0].height();y++)
+			{
+				for (int x = 0; x < mColorImages[0].width();x++)
+				{
+					auto rgb = cvColorImages[0].at<cv::Vec3b>(y, x);
+					color0->writePixel(x, y, rgb[2], rgb[1], rgb[0]);
+				}
+			}
+			color0->update();
+			return color0;
+			*/
+			// superresolution
+			{
+				const auto bbLengthX = boundaries[curChunkIdx].second.x - boundaries[curChunkIdx].first.x + 1;
+				const auto bbLengthY = boundaries[curChunkIdx].second.y - boundaries[curChunkIdx].first.y + 1;
+
+				constexpr float errorBound = 0.005;
+				constexpr float gamma = 0.8;
+				superresDepthImages[curChunkIdx] = cv::Mat(bbLengthY, bbLengthX, CV_16U);
+
+				// make an initial guess
+				for (int y = 0; y < bbLengthY; y++)
+				{
+					for (int x = 0; x < bbLengthX; x++)
+					{
+						auto depthValue = cvDepthImages[mChunkSize / 2].at<uint16_t>(y, x);
+						superresDepthImages[curChunkIdx].at<uint16_t>(y, x) = depthValue;
+					}
+				}
+
+				std::vector<cv::Mat> W(mNumChunks); // buffer for Wk
+				for (int i = 0;i < mNumChunks;i++)
+				{
+					W[i] = cv::Mat(bbLengthY, bbLengthX, CV_32F);
+				}
+				for (int k = 0;k < mNumChunks; k++)
+				{
+					for (int y = 1;y < bbLengthY - 1; y++)
+					{
+						for (int x = 1;x < bbLengthX - 1; x++)
+						{
+							int sum = 0;
+							for (int ks = 0;ks < mChunkSize;ks++)
+							{
+								//auto color = cvColorImages[ks].at<cv::Vec3b>(y, x);
+								//sum += color[0]<<2 + color[1]<<1 + color[2];
+								sum += *reinterpret_cast<uint32_t*>(&mColorImages[curChunkIdx*mChunkSize + k].read(x+boundaries[curChunkIdx*mChunkSize + k].first.x, y+boundaries[curChunkIdx*mChunkSize + k].first.y));
+							}
+							W[k].at<float>(y, x) = (0xFFFFFF - (*reinterpret_cast<uint32_t*>(&mColorImages[curChunkIdx*mChunkSize + k].read(x+boundaries[curChunkIdx*mChunkSize + k].first.x, y+boundaries[curChunkIdx*mChunkSize + k].first.y)) - sum / mChunkSize)) / 0xFFFFFF;
+							//auto color = cvColorImages[k].at<cv::Vec3b>(y, x);
+							//W[k].at<float>(y, x) = (0xFFFFFF - ((color[0]<<2 + color[1]<<2 + color[2]) - sum / mChunkSize)) / 0xFFFFFF;
+						}
+					}
+				}
+				std::cout << "Starting approximation " << curChunkIdx + 1 << "/" << superresDepthImages.size() << std::endl;
+				// approximation with gauss-seidel
+				float error = 0;
+				do
+				{
+					error = 0;
+					auto prevData = superresDepthImages[curChunkIdx].clone();
+					for (int y = 2;y < bbLengthY - 2; y++)
+					{
+						for (int x = 2;x < bbLengthX- 2; x++)
+						{
+
+							//first two loops give k
+							auto sumWk = 0.;
+							auto b = 0.;
+							for (int k = 0;k < mNumChunks;k++)
+							{
+								sumWk += W[k].at<float>(y, x);
+
+								//auto pos = depthPoints[y*KDP->ColorDataWidth() + x];
+								//if (!isinf(pos.X) && !isinf(pos.Y))
+								{
+									//b += W[k].at<float>(y, x)*mDepthImages[curChunkIdx].read(pos.X, pos.Y);
+									b += W[k].at<float>(y, x)*cvDepthImages[curChunkIdx].at<uint16_t>(y, x);
+								}
+							}
+							int sumNeighbourhood = 0;
+							// upper-left neighbourhood
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y - 2, x - 2) / sqrt(8);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y - 1, x - 2) / sqrt(5);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y - 0, x - 2) / sqrt(4);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y + 1, x - 2) / sqrt(5);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y + 2, x - 2) / sqrt(8);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y - 2, x - 1) / sqrt(2);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y - 1, x - 1) / sqrt(2);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y - 0, x - 1) / sqrt(1);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y + 1, x - 1) / sqrt(2);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y + 2, x - 1) / sqrt(5);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y - 2, x - 0) / sqrt(4);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].at<uint16_t>(y - 1, x - 0) / sqrt(1);
+							// lower-right neighbourhood
+							sumNeighbourhood += prevData.at<uint16_t>(y + 1, x - 0) / sqrt(2);
+							sumNeighbourhood += prevData.at<uint16_t>(y + 2, x - 0) / sqrt(4);
+							sumNeighbourhood += prevData.at<uint16_t>(y - 2, x + 1) / sqrt(5);
+							sumNeighbourhood += prevData.at<uint16_t>(y - 1, x + 1) / sqrt(2);
+							sumNeighbourhood += prevData.at<uint16_t>(y - 0, x + 1) / sqrt(1);
+							sumNeighbourhood += prevData.at<uint16_t>(y + 1, x + 1) / sqrt(2);
+							sumNeighbourhood += prevData.at<uint16_t>(y + 2, x + 1) / sqrt(5);
+							sumNeighbourhood += prevData.at<uint16_t>(y - 2, x + 2) / sqrt(8);
+							sumNeighbourhood += prevData.at<uint16_t>(y - 1, x + 2) / sqrt(5);
+							sumNeighbourhood += prevData.at<uint16_t>(y - 0, x + 2) / sqrt(4);
+							sumNeighbourhood += prevData.at<uint16_t>(y + 1, x + 2) / sqrt(5);
+							sumNeighbourhood += prevData.at<uint16_t>(y + 2, x + 2) / sqrt(8);
+
+							//SuperresDepthImages[curChunkIdx].write(x, y, (b + gamma*sumNeighbourhood) / (sumWk + 48 * gamma));
+							superresDepthImages[curChunkIdx].at<uint16_t>(y, x) = (b + gamma*sumNeighbourhood) / (sumWk + 48 * gamma);
+						}
+					}
+				} while (error > errorBound);
+
+				{
+					std::string filename = "superres_depth";
+					filename += std::to_string(curChunkIdx + 1);
+					filename += ".png";
+					try {
+						cv::imwrite(filename.c_str(), superresDepthImages[curChunkIdx]);
+						std::cout << "Successfully saved aligned data to " << filename << std::endl;
+					}
+					catch (std::runtime_error& ex) {
+						std::cout << "Exception converting image to PNG format: " << ex.what() << std::endl;
+						continue;
+					}
+				}
+			}
+			/*
+			{
+				constexpr float errorBound = 0.005;
+				constexpr float gamma = 0.8;
+				constexpr float eigenvalueThreshold = 5.0;
+
+				superresDepthImages[curChunkIdx] = Bgfx2DMemoryHelper<uint16_t>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
+				// make an initial guess
+				for (int y = 0; y < KDP->ColorDataHeight(); y++)
+				{
+					for (int x = 0; x < KDP->ColorDataWidth(); x++)
+					{
+						auto dp = depthPoints[y*KDP->ColorDataWidth() + x];
+						if (isinf(dp.X) || isinf(dp.Y))
+						{
+							superresDepthImages[curChunkIdx].write(x, y, 0);
+						}
+						else
+						{
+							superresDepthImages[curChunkIdx].write(x, y, mDepthImages[mChunkSize*curChunkIdx + mChunkSize / 2].read(dp.X, dp.Y));
+						}
+					}
+				}
+
+				// prepare W
+				std::vector<Bgfx2DMemoryHelper<float>> W(mNumChunks); // buffer for Wk
+				for (int i = 0;i < mNumChunks;i++)
+				{
+					W[i] = Bgfx2DMemoryHelper<float>(KDP->ColorDataWidth(), KDP->ColorDataHeight());
+				}
+				for (int k = 0;k < mNumChunks; k++)
+				{
+					for (int y = 1;y < KDP->ColorDataHeight() - 1; y++)
+					{
+						for (int x = 1;x < KDP->ColorDataWidth() - 1; x++)
+						{
+							int sum = 0;
+							for (int ks = 0;ks < mChunkSize;ks++)
+							{
+								sum += *reinterpret_cast<uint32_t*>(&mColorImages[curChunkIdx*mChunkSize + k].read(x, y));
+							}
+							W[k].write(x, y, (0xFFFFFF - (*reinterpret_cast<uint32_t*>(&mColorImages[curChunkIdx*mChunkSize + k].read(x, y)) - sum / mChunkSize)) / 0xFFFFFF);
+						}
+					}
+				}
+
+				std::cout << "Starting approximation " << curChunkIdx + 1 << "/" << superresDepthImages.size() << std::endl;
+				// approximation with gauss-seidel
+				float error = 0;
+				do
+				{
+					error = 0;
+					auto prevData = superresDepthImages[curChunkIdx].clone();
+					for (int y = 2;y < KDP->ColorDataHeight() - 2; y++)
+					{
+						for (int x = 2;x < KDP->ColorDataWidth() - 2; x++)
+						{
+
+							//first two loops give k
+							auto sumWk = 0.;
+							auto b = 0.;
+							for (int k = 0;k < mNumChunks;k++)
+							{
+								sumWk += W[k].read(x, y);
+
+								auto pos = depthPoints[y*KDP->ColorDataWidth() + x];
+								if (!isinf(pos.X) && !isinf(pos.Y))
+								{
+									b += W[k].read(x, y)*mDepthImages[curChunkIdx].read(pos.X, pos.Y);
+								}
+							}
+							int sumNeighbourhood = 0;
+							// upper-left neighbourhood
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x - 2, y - 2) / sqrt(8);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x - 1, y - 2) / sqrt(5);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x - 0, y - 2) / sqrt(4);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x + 1, y - 2) / sqrt(5);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x + 2, y - 2) / sqrt(8);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x - 2, y - 1) / sqrt(2);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x - 1, y - 1) / sqrt(2);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x - 0, y - 1) / sqrt(1);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x + 1, y - 1) / sqrt(2);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x + 2, y - 1) / sqrt(5);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x - 2, y - 0) / sqrt(4);
+							sumNeighbourhood += superresDepthImages[curChunkIdx].read(x - 1, y - 0) / sqrt(1);
+							// lower-right neighbourhood
+							sumNeighbourhood += prevData.read(x + 1, y - 0) / sqrt(2);
+							sumNeighbourhood += prevData.read(x + 2, y - 0) / sqrt(4);
+							sumNeighbourhood += prevData.read(x - 2, y + 1) / sqrt(5);
+							sumNeighbourhood += prevData.read(x - 1, y + 1) / sqrt(2);
+							sumNeighbourhood += prevData.read(x - 0, y + 1) / sqrt(1);
+							sumNeighbourhood += prevData.read(x + 1, y + 1) / sqrt(2);
+							sumNeighbourhood += prevData.read(x + 2, y + 1) / sqrt(5);
+							sumNeighbourhood += prevData.read(x - 2, y + 2) / sqrt(8);
+							sumNeighbourhood += prevData.read(x - 1, y + 2) / sqrt(5);
+							sumNeighbourhood += prevData.read(x - 0, y + 2) / sqrt(4);
+							sumNeighbourhood += prevData.read(x + 1, y + 2) / sqrt(5);
+							sumNeighbourhood += prevData.read(x + 2, y + 2) / sqrt(8);
+
+							//SuperresDepthImages[curChunkIdx].write(x, y, (b + gamma*sumNeighbourhood) / (sumWk + 48 * gamma));
+							superresDepthImages[curChunkIdx].write(x, y, (b + gamma*sumNeighbourhood) / (sumWk + 48 * gamma));
+						}
+					}
+				} while (error > errorBound);
+
+				std::cout << "Finished approximation " << curChunkIdx + 1 << "/" << superresDepthImages.size() << std::endl;
+			}
+			*/
 		}
 
 		// segmentation
+		/*
 		std::cout << "Starting segmentation" << std::endl;
 		{
 			std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
-			for (int curDepthImageIdx = 0; curDepthImageIdx < superresDepthImages.size(); curDepthImageIdx++)
+			for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
 			{
-				const auto index = curDepthImageIdx*mChunkSize + mChunkSize / 2;
+				const auto aligneeImageIndex = curChunkIdx*mChunkSize + mChunkSize / 2;
 				CM->MapColorFrameToDepthSpace(mDepthImages[index].width()*mDepthImages[index].height(), mDepthImages[index].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
 
 				// create silhouette
@@ -591,7 +968,7 @@ public:
 						//cvImage.at<uint16_t>(y, x) = superresDepthImages[i].read(x, y);
 					}
 				}
-
+				
 				// save superres images to file
 				std::string filename = std::to_string(curDepthImageIdx);
 				filename += "-angle";
@@ -608,58 +985,66 @@ public:
 			}
 		}
 		std::cout << "Finished segmentation" << std::endl;
+		*/		
 
 		// generate point clouds
 		std::cout << "Starting point cloud generation" << std::endl;
-		std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr> pointClouds(superresDepthImages.size());
+		std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr> pointClouds(mNumChunks);
 		{
-			std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
-			std::unique_ptr<CameraSpacePoint[]> cameraPoints(new CameraSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<CameraSpacePoint[]>());
-			for (int curDepthImageIdx = 0; curDepthImageIdx < superresDepthImages.size(); curDepthImageIdx++)
+			for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
 			{
-				const auto index = curDepthImageIdx*mChunkSize + mChunkSize / 2;
-				pointClouds[curDepthImageIdx] = pcl::PointCloud<pcl::PointXYZRGB>::Ptr(new pcl::PointCloud<pcl::PointXYZRGB>());
-				CM->MapColorFrameToDepthSpace(mDepthImages[index].width()*mDepthImages[index].height(), mDepthImages[index].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
-				CM->MapDepthFrameToCameraSpace(superresDepthImages[curDepthImageIdx].width()*superresDepthImages[curDepthImageIdx].height(), superresDepthImages[curDepthImageIdx].raw(), superresDepthImages[curDepthImageIdx].width()*superresDepthImages[curDepthImageIdx].height(), cameraPoints.get());
-			
-				for (int y = 0;y < KDP->ColorDataHeight(); y++)
+				const auto aligneeImageIndex = curChunkIdx*mChunkSize + mChunkSize / 2;
+				const auto& curSuperresDepthImage = superresDepthImages[curChunkIdx];
+				const auto& aligneeDepthImage = mDepthImages[aligneeImageIndex];
+				const auto& aligneeColorImage = mColorImages[aligneeImageIndex];
+				const auto& curBodyHull = bodyHull[curChunkIdx];
+				
+				// filter noise by reducing body hull
+				//cv::erode(curBodyHull, curBodyHull, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(12, 12)));
+				
+				pointClouds[curChunkIdx] = pcl::PointCloud<pcl::PointXYZRGB>::Ptr(new pcl::PointCloud<pcl::PointXYZRGB>());
+				///@TODO fix this with MapDepthPointsToCameraSpace 
+				//CM->MapDepthFrameToCameraSpace(KDP->ColorDataWidth()*KDP->ColorDataHeight(), reinterpret_cast<uint16_t*>(curSuperresDepthImage.data), curSuperresDepthImage.width()*curSuperresDepthImage.height(), cameraPoints.get());
+				const auto bbLengthX = boundaries[curChunkIdx].second.x - boundaries[curChunkIdx].first.x + 1;
+				const auto bbLengthY = boundaries[curChunkIdx].second.y - boundaries[curChunkIdx].first.y + 1;
+
+				// convert to camera space
+				for (int y = 0;y < bbLengthY; y++)
 				{
-					for (int x = 0;x < KDP->ColorDataWidth(); x++)
+					for (int x = 0;x < bbLengthX; x++)
 					{
-						auto dp = depthPoints[y*KDP->ColorDataWidth() + x];
-						//for (auto &indexImage : mIndexImages) 
+						if (curBodyHull.at<byte>(y + boundaries[curChunkIdx].first.y, x + boundaries[curChunkIdx].first.x))
 						{
-							if (!isinf(dp.X) /* && indexImage.read(dp.X, dp.Y) != 0xff */)
-							{
-								auto color = mColorImages[index].read(x, y);
-								pcl::PointXYZRGB p;
-								p.x = x;
-								p.y = y;
-								p.z = superresDepthImages[curDepthImageIdx].read(x, y);
-								//p.z = mDepthImages[index].read(dp.X, dp.Y);
-								p.r = color.rgbRed;
-								p.g = color.rgbBlue;
-								p.b = color.rgbGreen;
-								pointClouds[curDepthImageIdx]->push_back(p);
-							}
+							
+							auto color = aligneeColorImage.read(x + boundaries[curChunkIdx].first.x, y + boundaries[curChunkIdx].first.y);
+							pcl::PointXYZRGB p;
+							p.x = x;
+							p.y = y;
+							p.z = curSuperresDepthImage.at<uint16_t>(y, x);
+							p.r = color.rgbBlue;
+							p.g = color.rgbRed;
+							p.b = color.rgbGreen;
+							pointClouds[curChunkIdx]->push_back(p);
 						}
 					}
 				}
-				
-				/*
-				for (int pointIndex = 0; pointIndex < superresDepthImages[0].width()*superresDepthImages[0].height(); pointIndex++)
-				{
-					CameraSpacePoint p = cameraPoints[pointIndex];
-					if (p.Z <= 5.) // only map close points
-					{
-						pointClouds[i]->push_back({ p.X, p.Y, p.Z });
-					}
-					
-				}
-				*/
 			}
 		}
-		std::cout << "Finished point cloud generation" << std::endl;
+
+		std::cout << "Filter point cloud" << std::endl;
+		{
+			for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
+			{
+				boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGB>> cloud_filtered = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+				pcl::RadiusOutlierRemoval<pcl::PointXYZRGB> outrem;
+				outrem.setInputCloud(pointClouds[curChunkIdx]);
+				outrem.setRadiusSearch(10);
+				outrem.setMinNeighborsInRadius(50);
+				outrem.filter(*cloud_filtered);
+				pointClouds[curChunkIdx] = cloud_filtered;
+			}
+		}
+
 
 		pcl::visualization::PCLVisualizer viewer("PCL Viewer");
 		viewer.setBackgroundColor(0.0, 0.0, 0.5);
@@ -668,6 +1053,8 @@ public:
 		{
 			viewer.spinOnce();
 		}
+		pcl::io::savePLYFile("Point Cloud.ply",*pointClouds[0]);
+
 		/*
 		std::cout << "Starting normal estimation" << std::endl;
 		pcl::NormalEstimationOMP<pcl::PointXYZ, pcl::Normal> neomp;
@@ -773,7 +1160,7 @@ int _main_(int _argc, char** _argv)
 		KinectDataProvider KDP;
 		
 		bool runningReconstruction = false;
-		ReconstructionState reconstruction(10, 1);
+		ReconstructionState reconstruction(7, 1);
 		
 		//assumption: tracking space is 10x10x8 (x,y,z) meters
 		constexpr unsigned int kinectSkeletonSpaceX = 10;
@@ -984,7 +1371,7 @@ int _main_(int _argc, char** _argv)
 					 
 					if (runningReconstruction)
 					{
-						if (reconstruction.targetAngle() - 5. < bodyAngle && bodyAngle < reconstruction.targetAngle() + 5.)
+						if (reconstruction.targetAngle() - 2. < bodyAngle && bodyAngle < reconstruction.targetAngle() + 2.)
 						{
 							auto body = KDP.LatestBodyData(lastTrackedBody);
 							Joint joints[JointType_Count];
