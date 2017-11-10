@@ -1262,7 +1262,7 @@ public:
 		std::vector<boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGBL>>> labeledPointClouds(mPointClouds.size());
 		for (int i = 0; i < mPointClouds.size(); i++)
 		{
-			LOG_S(INFO) << "Initial labeling and transformation " << i + 1 << "/" << mPointClouds.size();
+			LOG_S(INFO) << "Initial labeling and transformation " << i + 1 << "/" << mPointClouds.size() << " with " << mPointClouds[i].size() << " points";
 			labeledPointClouds[i] = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBL>>();
 			
 			Eigen::Vector4f centroid;
@@ -1291,28 +1291,52 @@ public:
 
 		// rigid registration
 		{
-			constexpr int maxIterations = 1;
+			constexpr int maxIterations = 2;
 			constexpr double errorBound = 0.05;
-			
-			LOG_SCOPE_F(INFO, "Starting rigid registration with max %i iterations and an error bound of %f.", maxIterations, error);
-			LOG_F(INFO, "%-20s | %-20s | %-20s", "iteration", "error", "iter_time");
 
-			int numIterations = 0;
-			double error = 1.;
 			std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
+
+			LOG_SCOPE_F(INFO, "Starting rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
+			LOG_F(INFO, "%-5s | %-15s | %-15s | %-15s | %-15s | %-15s", "iter", "error", "kdtree time", "var time", "eq build", "eq solve");
+
+			int iterations = 0;
+			double error = 1.;
+
 			do
 			{
 				// update closest points
+				auto startTimeKDTree = std::chrono::high_resolution_clock::now();
 				for (int i = 0;i < kdtrees.size(); i++)
 				{
 					kdtrees[i].setInputCloud(labeledPointClouds[i]);
 				}
+				auto endTimeKDTree = std::chrono::high_resolution_clock::now();
+				auto KDTreeRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeKDTree - startTimeKDTree).count();
+
 
 				// update variance
+				auto startTimeVariance = std::chrono::high_resolution_clock::now();
+				//...
+				auto endTimeVariance = std::chrono::high_resolution_clock::now();
+				auto VarianceRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeVariance - startTimeVariance).count();
+
+				// build equation system
+				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
+				//...
+				auto endTimeEQBuild = std::chrono::high_resolution_clock::now();
+				auto EQBuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQBuild - startTimeEQBuild).count();
+
 
 				// solve equation system to find rotation and translation deltas
-				numIterations++;
-			} while (numIterations < maxIterations && error > errorBound);
+				auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
+				//...
+				auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
+				auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
+
+
+				iterations++;
+				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i", iterations, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime);
+			} while (iterations < maxIterations && error > errorBound);
 		}
 
 
