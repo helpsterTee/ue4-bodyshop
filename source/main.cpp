@@ -96,7 +96,7 @@ public:
 			}
 			depthBuffer = bgfx::alloc(depthBufferWidth*depthBufferHeight*sizeof(unsigned short));
 		}
-		
+
 		// color
 		{
 			ComWrapper<IColorFrameReference> colorFrameRef;
@@ -195,7 +195,7 @@ public:
 				throw std::runtime_error("Failed to copy color data.");
 			}
 		}
-		
+
 
 		// body
 		{
@@ -210,8 +210,8 @@ public:
 				throw std::runtime_error("Failed to grab body frame.");
 			}
 			if (FAILED(bodyFrame->GetAndRefreshBodyData(_countof(bodies), bodies)))
-			{ 
-				throw std::runtime_error("Failed to grab body data."); 
+			{
+				throw std::runtime_error("Failed to grab body data.");
 			}
 		}
 
@@ -232,7 +232,7 @@ public:
 			{
 				throw std::runtime_error("Failed to grab body data.");
 			}
-			
+
 		}
 
 		return true;
@@ -356,7 +356,7 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <algorithm>
 
 #include <Eigen/Core>
-#include <Eigen/Eigenvalues> 
+#include <Eigen/Eigenvalues>
 
 #include <iostream>
 
@@ -468,11 +468,11 @@ public:
 		mColorImages[index] = colorImage;
 		mDepthImages[index] = depthImage;
 		mIndexImages[index] = indexImage;
-		for (int i = 0; i < JointType_Count;i++) 
+		for (int i = 0; i < JointType_Count;i++)
 		{
 			mJointData[index][i] = joints[i];
 		}
-		
+
 		if (++mCurrentImageInChunk >= mChunkSize)
 		{
 			mCurrentImageInChunk = 0;
@@ -480,7 +480,7 @@ public:
 		}
 	}
 
-	float targetAngle() const 
+	float targetAngle() const
 	{
 		return angleForChunk(mCurrentChunk, mNumChunks); // 100 degree from the front and 100 degree from the back...
 	}
@@ -494,7 +494,7 @@ public:
 	void constructPointClouds(KinectDataProvider* KDP)
 	{
 		auto CM = KDP->CoordinateMapper();
-		
+
 		// compute body hull
 		std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
 		std::unique_ptr<cv::Mat[]> bodyHull(new cv::Mat[mNumChunks], std::default_delete<cv::Mat[]>());
@@ -574,7 +574,7 @@ public:
 			}
 		}
 
-		// preprocess data	
+		// preprocess data
 		std::vector<cv::Mat> superresDepthImages(mNumChunks);
 		for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
 		{
@@ -655,7 +655,7 @@ public:
 			{
 				for (int x = 0;x < KDP->ColorDataWidth(); x++)
 				{
-					if (!(boundaries[curChunkIdx].first.x <= x && x <= boundaries[curChunkIdx].second.x 
+					if (!(boundaries[curChunkIdx].first.x <= x && x <= boundaries[curChunkIdx].second.x
 						&& boundaries[curChunkIdx].first.y <= y && y <= boundaries[curChunkIdx].second.y))
 					{
 						for (int i = curChunkIdx*mChunkSize;i < (curChunkIdx + 1)*mChunkSize; i++)
@@ -686,7 +686,7 @@ public:
 
 				std::cout << "Aligning" << chunkImageIdx + 1 << "/" << mChunkSize << std::endl;
 				if (chunkImageIdx == mChunkSize / 2) { continue; } // skip self
-				
+
 				cv::Mat flow;
 				optflow->calc(greyImage, referenceImageGrey, flow);
 				{
@@ -848,7 +848,7 @@ public:
 				{
 					LOG_SCOPE_F(INFO, "Starting approximation %i/%i.", curChunkIdx + 1, superresDepthImages.size());
 					LOG_F(INFO, "%-20s | %-20s | %-20s", "iteration", "error", "iter_time");
-					
+
 					double error = 0;
 					int iter = 0;
 					do
@@ -960,7 +960,7 @@ public:
 						//cvImage.at<uint16_t>(y, x) = superresDepthImages[i].read(x, y);
 					}
 				}
-				
+
 				// save superres images to file
 				std::string filename = std::to_string(curDepthImageIdx);
 				filename += "-angle";
@@ -977,7 +977,7 @@ public:
 			}
 		}
 		std::cout << "Finished segmentation" << std::endl;
-		*/		
+		*/
 
 		// generate point clouds
 		{
@@ -990,7 +990,7 @@ public:
 				const auto& aligneeDepthImage = mDepthImages[aligneeImageIndex];
 				const auto& aligneeColorImage = mColorImages[aligneeImageIndex];
 				const auto& curBodyHull = bodyHull[curChunkIdx];
-				
+
 				// prefiltered save
 				const auto bbLengthX = boundaries[curChunkIdx].second.x - boundaries[curChunkIdx].first.x + 1;
 				const auto bbLengthY = boundaries[curChunkIdx].second.y - boundaries[curChunkIdx].first.y + 1;
@@ -1029,7 +1029,7 @@ public:
 
 				// filter noise by reducing body hull
 				cv::erode(curBodyHull, curBodyHull, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(12, 12)));
-				
+
 				// convert to point cloud
 				for (int y = 0;y < bbLengthY; y++)
 				{
@@ -1037,7 +1037,7 @@ public:
 					{
 						if (curBodyHull.at<byte>(y + boundaries[curChunkIdx].first.y, x + boundaries[curChunkIdx].first.x))
 						{
-							// this shit does not work... 
+							// this shit does not work...
 							//CM->MapDepthPointToCameraSpace(dp, curSuperresDepthImage.at<uint16_t>(y, x), &cp);
 							auto color = aligneeColorImage.read(x + boundaries[curChunkIdx].first.x, y + boundaries[curChunkIdx].first.y);
 							pcl::PointXYZRGB p;
@@ -1220,14 +1220,14 @@ public:
 	}
 
 	//! Cui et.al. (7)
-	double calculateVariance(const pcl::PointCloud<pcl::PointXYZRGBL>::Ptr& f, const pcl::KdTreeFLANN<pcl::PointXYZRGBL>& kdtree ) const
+	double calculateVariance(const pcl::PointCloud<pcl::PointXYZRGBL>::Ptr& f, const pcl::KdTreeFLANN<pcl::PointXYZRGBL>& gkdtree ) const
 	{
 		std::vector<int> pointIdxNKNSearch(Nnear);
 		std::vector<float> pointNKNSquaredDistance(Nnear);
 		double sum = 0.;
 		for (int n = 0;n < f->size();n++)
 		{
-			auto numFoundPoints = kdtree.nearestKSearch((*f)[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+			auto numFoundPoints = gkdtree.nearestKSearch((*f)[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
 			for (int m = 0; m < numFoundPoints; m++)
 			{
 				sum += pointNKNSquaredDistance[m];
@@ -1258,13 +1258,14 @@ public:
 	void reconstructAvatar()
 	{
 		LOG_SCOPE_FUNCTION(INFO);
+
 		//  initial solution from capturing
 		std::vector<boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGBL>>> labeledPointClouds(mPointClouds.size());
 		for (int i = 0; i < mPointClouds.size(); i++)
 		{
 			LOG_S(INFO) << "Initial labeling and transformation " << i + 1 << "/" << mPointClouds.size() << " with " << mPointClouds[i].size() << " points";
 			labeledPointClouds[i] = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBL>>();
-			
+
 			Eigen::Vector4f centroid;
 			pcl::compute3DCentroid(*mPointClouds[i], centroid);
 			float backsideRotation = (i >= mPointClouds.size() / 2) ? 0 : 180; //workaround for kinect 2 tracking (cannot detect backside properly)
@@ -1291,6 +1292,14 @@ public:
 
 		// rigid registration
 		{
+			int totalNumPoints = 0;
+			std::vector<int> cloudOffsets(mPointClouds->size());
+			for(int i=0; i<mPointClouds->size(); i++)
+			{
+				cloudOffsets[i] = totalNumPoints;
+				totalNumPoints += mPointClouds[i]->size();
+			}
+
 			constexpr int maxIterations = 2;
 			constexpr double errorBound = 0.05;
 
@@ -1313,23 +1322,103 @@ public:
 				auto endTimeKDTree = std::chrono::high_resolution_clock::now();
 				auto KDTreeRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeKDTree - startTimeKDTree).count();
 
-
-				// update variance
+				// update variances
 				auto startTimeVariance = std::chrono::high_resolution_clock::now();
-				//...
+				eigen::MatrixXd variances(mPointClouds->size(),mPointClouds->size());
+				for(int f = 0; f < mPointClouds->size(); f++)
+				{
+					for(int g = 0; g < mPointClouds->size(); g++)
+					{
+						variances(f,g) = calculateVariance(mPointClouds[f], kdtrees[g]);
+					}
+				}
 				auto endTimeVariance = std::chrono::high_resolution_clock::now();
 				auto VarianceRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeVariance - startTimeVariance).count();
 
 				// build equation system
 				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
-				//...
+				// rotations and translations = 6 paramters per frame
+				eigen::MatrixXd A = eigen::MatrixXd::Zero(6*totalNumPoints, 6*mPointClouds->size());
+				eigen::VectorXd b = eigen::VectorXd::Zero(6*totalNumPoints);
+				std::vector<int> pointIdxNKNSearch(Nnear);
+				std::vector<float> pointNKNSquaredDistance(Nnear);
+				for(int f = 0; f < mPointClouds->size(); f++)
+				{
+					for(int g = 0; g < mPointClouds->size(); g++)
+					{
+						if(f!=g)
+						{
+							for(int n = 0; n < mPointClouds[f]->size(); n++)
+							{
+								auto numFoundPoints = kdtree[g].nearestKSearch(mPointClouds[f][fpoint], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+								for(int i = 0; i < numFoundPoints; i++)
+								{
+									int m = pointIdxNKNSearch[i];
+									double pOverVar = calculatePOld(n, m, kdtree[g], variances(f,g))/variance(f,g);
+
+									int rowf = 6*(cloudOffsets[f]+n);
+									int rowg = 6*(cloudOffsets[g]+m);
+									int colf = 6*f;
+									int rowg = 6*g;
+
+									auto yfn = mPointClouds[f][n];
+									auto ygm = mPointClouds[g][m];
+
+									// fill A
+									// I3
+									A(rowf+0, colf+0) += 1*pOverVar;
+									A(rowf+1, colf+1) += 1*pOverVar;
+									A(rowf+2, colf+2) += 1*pOverVar;
+									// -I3
+									A(rowf+0, colf+0+3) += -1*pOverVar;
+									A(rowf+1, colf+1+3) += -1*pOverVar;
+									A(rowf+2, colf+2+3) += -1*pOverVar;
+									// -y_f,n hat
+									A(rowf+0, colg+1+3) += -1*pOverVar*yfn.z; A(rowf+0, colg+2+3) += -1*pOverVar*-yfn.y;
+									A(rowf+1, colg+0+3) += -1*pOverVar*-yfn.z; A(rowf+1, colg+2+3) += -1*pOverVar*yfn.x;
+									A(rowf+2, colg+0+3) += -1*pOverVar*yfn.y; A(rowf+2, colg+1+3) += -1*pOverVar*-yfn.x;
+									// y_f,n hat
+									A(rowf+0, colg+1+3) += pOverVar*yfn.z; A(rowf+0, colg+2+3) += pOverVar*-yfn.y;
+									A(rowf+1, colg+0+3) += pOverVar*-yfn.z; A(rowf+1, colg+2+3) += pOverVar*yfn.x;
+									A(rowf+2, colg+0+3) += pOverVar*yfn.y; A(rowf+2, colg+1+3) += pOverVar*-yfn.x;
+									// next row
+									// y_f,n hat
+									A(rowg+0, colf+1) += pOverVar*yfn.z; A(rowg+0, colf+2) += pOverVar*-yfn.y;
+									A(rowg+1, colf+0) += pOverVar*-yfn.z; A(rowg+1, colf+2) += pOverVar*yfn.x;
+									A(rowg+2, colf+0) += pOverVar*yfn.y; A(rowg+2, colf+1) += pOverVar*-yfn.x;
+									// -y_f,n hat
+									A(rowg+0, colf+1+3) += -1*pOverVar*yfn.z; A(rowg+0, colf+2+3) += -1*pOverVar*-yfn.y;
+									A(rowg+1, colf+0+3) += -1*pOverVar*-yfn.z; A(rowg+1, colf+2+3) += -1*pOverVar*yfn.x;
+									A(rowg+2, colf+0+3) += -1*pOverVar*yfn.y; A(rowg+2, colf+1+3) += -1*pOverVar*-yfn.x;
+									// -y_f,n hat * y_f,n hat
+									A(rowg+0, colg+0) += -1*pOverVar*-(yfn.z*yfn.z+yfn.y*yfn.y); A(rowg+0, colf+1) += -1*pOverVar*yfn.x*yfn.y; A(rowg+0, colf+2) += -1*pOverVar*yfn.x*yfn.z;
+									A(rowg+1, colg+0) += -1*pOverVar*yfn.x*yfn.y; A(rowg+1, colf+1) += -1*pOverVar*-(yfn.x*yfn.x+yfn.z*yfn.z); A(rowg+1, colf+2) += -1*pOverVar*yfn.y*yfn.z;
+									A(rowg+2, colg+0) += -1*pOverVar*yfn.x*yfn.z; A(rowg+2, colf+1) += -1*pOverVar*yfn.y*yfn.z; A(rowg+2, colf+2) += -1*pOverVar*-(yfn.x*yfn.x+yfn.y*yfn.y);
+									// y_f,n hat * y_g,m hat
+									A(rowg+0, colg+0+3) += pOverVar*-(ygm.z*yfn.z+ygm.y*yfn.y); A(rowg+0, colf+1+3) += pOverVar*ygm.x*yfn.y; A(rowg+0, colf+2+3) += pOverVar*ygm.x*yfn.z;
+									A(rowg+1, colg+0+3) += pOverVar*yfn.x*ygm.y; A(rowg+1, colf+1+3) += pOverVar*-(ygm.x*yfn.x+ygm.z*yfn.z); A(rowg+1, colf+2+3) += pOverVar*yfn.y*ygm.z;
+									A(rowg+2, colg+0+3) += pOverVar*yfn.x*ygm.z; A(rowg+2, colf+1+3) += pOverVar*yfn.y*ygm.z; A(rowg+2, colf+2+3) += pOverVar*-(ygm.x*yfn.x+ygm.y*yfn.y);
+
+									// fill b
+									b(rowf+0) += pOverVar*(ygm.x - yfn.x;)
+									b(rowf+1) += pOverVar*(ygm.y - yfn.y);
+									b(rowf+2) += pOverVar*(ygm.z - yfn.z);
+
+									b(rowg+0) += pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
+									b(rowg+1) += pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
+									b(rowg+2) += pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
+								}
+							}
+						}
+					}
+				}
 				auto endTimeEQBuild = std::chrono::high_resolution_clock::now();
 				auto EQBuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQBuild - startTimeEQBuild).count();
 
 
-				// solve equation system to find rotation and translation deltas
+				// solve equation system Ax=b to find rotation and translation deltas
 				auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
-				//...
+				//auto delta = A.householderQR.solve(b);
 				auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
 				auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
 
@@ -1349,11 +1438,11 @@ public:
 			LOG_S(INFO) << "Merging " << i + 1 << "/" << mPointClouds.size() << std::endl;
 			completePointCloud += *labeledPointClouds[i];
 		}
-		
+
 		std::string filename = "data/point_cloud_merged";
 		LOG_S(INFO) << "Saving back results...";
 		try {
-			
+
 			pcl::io::savePLYFile(filename + ".ply", completePointCloud);
 			pcl::io::savePCDFile(filename + ".pcd", completePointCloud);
 			LOG_S(INFO) << "Successfully saved filtered point cloud to " << filename;
@@ -1402,7 +1491,7 @@ public:
 					if(pcl::io::loadPCDFile(p.path().generic_string(), *mPointClouds[index-1]) != -1)
 					{
 						LOG_S(INFO) << "Loading successful!";
-					} 
+					}
 					//else // error to cout by pcl
 				}
 			}
@@ -1470,10 +1559,10 @@ int _main_(int _argc, char** _argv)
 
 		cv::ocl::Device(context.device(0)); //Here is where you change which GPU to use (e.g. 0 or 1)
 		KinectDataProvider KDP;
-		
+
 		bool runningCapture = false;
 		ReconstructionState reconstruction(7, 6);
-		
+
 		//assumption: tracking space is 10x10x8 (x,y,z) meters
 		constexpr unsigned int kinectSkeletonSpaceX = 10;
 		constexpr unsigned int kinectSkeletonSpaceY = 10;
@@ -1665,7 +1754,7 @@ int _main_(int _argc, char** _argv)
 						}
 					}
 					ColorImage.update();
-					
+
 
 					auto LatestDepthBuffer = Bgfx2DMemoryHelper<uint16_t>(KDP.DepthDataWidth(), KDP.DepthDataHeight(), KDP.LatestDepthData());
 					// Convert D16 to RGBA8 (grey ramp)
@@ -1677,8 +1766,8 @@ int _main_(int _argc, char** _argv)
 						}
 					}
 					DepthRampImage.update();
-					
-					 
+
+
 					if (runningCapture)
 					{
 						if (reconstruction.targetAngle() - 2. < bodyAngle && bodyAngle < reconstruction.targetAngle() + 2.)
@@ -1701,7 +1790,7 @@ int _main_(int _argc, char** _argv)
 				}
 			}
 			catch(...)
-			{ 
+			{
 				//std::cout << "Interaction with the kinect failed." << std::endl;
 			}
 			bgfx::setViewRect(0, 0, 0, windowWidth, windowHeight);
@@ -1718,7 +1807,7 @@ int _main_(int _argc, char** _argv)
 				, windowWidth
 				, windowHeight
 				);
-				
+
 				ImGui::Begin("General Settings");
 					ImGui::Checkbox("Show Color Image", &showColorImage);
 					ImGui::Checkbox("Show Depth Buffer", &showDepthBuffer);
@@ -1781,7 +1870,7 @@ int _main_(int _argc, char** _argv)
 						{
 							reconstruction.reconstructAvatar();
 						}
-					ImGui::EndGroup(); 
+					ImGui::EndGroup();
 				ImGui::End();
 
 				if (showDepthBuffer)
@@ -1825,7 +1914,7 @@ int _main_(int _argc, char** _argv)
 					//	ImGui::Image(reconstruction.getDepthDeviation()->handle(), ImGui::GetContentRegionAvail());
 					//ImGui::End();
 				}
-				
+
 			imguiEndFrame();
 
 			bgfx::touch(0);
