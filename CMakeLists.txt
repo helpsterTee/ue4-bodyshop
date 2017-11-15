@@ -93,7 +93,7 @@ find_package( Eigen3 REQUIRED )
 include_directories(${EIGEN3_INCLUDE_DIR})
 
 # ------------------- PCL ---------------------- #
-find_package(PCL 1.7 REQUIRED COMPONENTS common console features io registration surface visualization)
+find_package(PCL 1.7 REQUIRED COMPONENTS common console features io registration surface visualization segmentation)
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 

@@ -356,6 +356,7 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <algorithm>
 
 #include <Eigen/Core>
+#include <Eigen/Sparse>
 #include <Eigen/Eigenvalues>
 
 #include <iostream>
@@ -370,6 +371,8 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <pcl/visualization/cloud_viewer.h>
 #include <pcl/filters/radius_outlier_removal.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/extract_indices.h>
+#include <pcl/segmentation/extract_clusters.h>
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/io/ply_io.h>
@@ -379,7 +382,7 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <opencv2/optflow.hpp>
 #include <opencv2/video.hpp>
 
-constexpr int Nnear = 30;
+constexpr int Nnear = 20;
 
 float angleForChunk(const int const current, const int total)
 {
@@ -1150,22 +1153,60 @@ public:
 	void preprocessPointClouds()
 	{
 		LOG_SCOPE_FUNCTION(INFO);
-		constexpr double radius = 0.01;
+		constexpr double radius = 0.035; //1cm
 		constexpr int Nnear = 25;
 		pcl::RadiusOutlierRemoval<pcl::PointXYZRGB> outrem;
 		outrem.setRadiusSearch(radius);
 		outrem.setMinNeighborsInRadius(Nnear);
+
+		constexpr double clusterMaxDist = 0.04; //2cm
+		pcl::EuclideanClusterExtraction<pcl::PointXYZRGB> ec;
+		ec.setClusterTolerance(clusterMaxDist);
+		ec.setMinClusterSize(1);
 
 		for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
 		{
 			LOG_SCOPE_F(INFO, "Preprocessing point cloud %i/%i", curChunkIdx + 1, mNumChunks);
 			boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGB>> cloud_filtered = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
 			{
-				LOG_F(INFO, "Remove radius outliers: radius=%f m, Nnear=%i", radius, Nnear);
+				/*
+				LOG_SCOPE_F(INFO, "Remove radius outliers: radius=%f m, Nnear=%i", radius, Nnear);
 				auto startTime = std::chrono::high_resolution_clock::now();
 				outrem.setInputCloud(mPointClouds[curChunkIdx]);
 				outrem.filter(*cloud_filtered);
 				LOG_S(INFO) << "Took " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - startTime).count() << "ms";
+				*/
+				cloud_filtered = mPointClouds[curChunkIdx];
+			}
+			mPointClouds[curChunkIdx] = cloud_filtered;
+			{
+				LOG_SCOPE_F(INFO, "Extract biggest cluster with tolecance of %f m", clusterMaxDist);
+				// build kdtree
+				///@todo check whenever FLANN can be used here.
+				pcl::search::KdTree<pcl::PointXYZRGB>::Ptr kdtree(new pcl::search::KdTree<pcl::PointXYZRGB>);
+				kdtree->setInputCloud(mPointClouds[curChunkIdx]);
+				// extract clusters
+				std::vector<pcl::PointIndices> cluster_indices;
+				ec.setMaxClusterSize(mPointClouds[curChunkIdx]->size());
+				ec.setSearchMethod(kdtree);
+				ec.setInputCloud(mPointClouds[curChunkIdx]);
+				ec.extract(cluster_indices);
+
+				pcl::PointIndices biggest_chunk = *cluster_indices.begin();
+				for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin(); it != cluster_indices.end(); ++it)
+				{
+					LOG_F(INFO, "Found cluster of size %i", it->indices.size());
+					if (biggest_chunk.indices.size() > it->indices.size())
+					{
+						biggest_chunk = *it;
+					}
+				}
+				pcl::ExtractIndices<pcl::PointXYZRGB> eifilter(true); // Initializing with true will allow us to extract the removed indices
+				pcl::PointIndices::Ptr p_biggest_chunk( new pcl::PointIndices);
+				*p_biggest_chunk = biggest_chunk;
+				eifilter.setInputCloud(mPointClouds[curChunkIdx]);
+				eifilter.setIndices(p_biggest_chunk);
+				eifilter.filter(*cloud_filtered);
 			}
 			mPointClouds[curChunkIdx] = cloud_filtered;
 			{
@@ -1190,7 +1231,7 @@ public:
 	void downsamplePointClouds()
 	{
 		LOG_SCOPE_FUNCTION(INFO);
-		constexpr double leafsize = 0.01;
+		constexpr double leafsize = 0.025;
 		pcl::VoxelGrid<pcl::PointXYZRGB> sor;
 		sor.setLeafSize(leafsize, leafsize, leafsize);
 
@@ -1220,7 +1261,8 @@ public:
 	}
 
 	//! Cui et.al. (7)
-	double calculateVariance(const pcl::PointCloud<pcl::PointXYZRGBL>::Ptr& f, const pcl::KdTreeFLANN<pcl::PointXYZRGBL>& gkdtree ) const
+	template<class TPOINT>
+	double calculateVariance(const boost::shared_ptr<pcl::PointCloud<TPOINT>> f, const pcl::KdTreeFLANN<TPOINT>& gkdtree ) const
 	{
 		std::vector<int> pointIdxNKNSearch(Nnear);
 		std::vector<float> pointNKNSquaredDistance(Nnear);
@@ -1233,26 +1275,27 @@ public:
 				sum += pointNKNSquaredDistance[m];
 			}
 		}
-		return sum;
+		return sum/(f->size()*Nnear);
 	}
 
 	// calculate the bayesian probability between m in f and m in g. Look at [2] from Cui et.al. for formula.
-	double calculatePOld(const pcl::PointXYZRGBL &yfn, const pcl::PointXYZRGBL &ygm, const pcl::KdTreeFLANN<pcl::PointXYZRGBL>& kdtree, const double variance)
+	template<class TPOINT>
+	double calculatePOld(const TPOINT &yfn, const TPOINT &ygm, const pcl::KdTreeFLANN<TPOINT>& kdtree, const double variance)
 	{
 		std::vector<int> pointIdxNKNSearch(Nnear);
 		std::vector<float> pointNKNSquaredDistance(Nnear);
 		double sum = 0.;
 		double minus2variance = -2 * variance;
-		for (int n = 0;n < kdtree.getInputCloud()->size();n++)
+		//for (int n = 0;n < kdtree.getInputCloud()->size();n++)
 		{
 			auto numFoundPoints = kdtree.nearestKSearch(ygm, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
 			for (int m = 0; m < numFoundPoints; m++)
 			{
-				sum += exp(pointNKNSquaredDistance[m])/(minus2variance);
+				sum += exp(pointNKNSquaredDistance[m]/minus2variance);
 			}
 		}
 		double distSquared = (yfn.x - ygm.x)*(yfn.x - ygm.x) + (yfn.y - ygm.y)*(yfn.y - ygm.y) + (yfn.z - ygm.z)*(yfn.z - ygm.z);
-		return (exp(distSquared)/ minus2variance) / sum;
+		return exp(distSquared/minus2variance) / sum;
 	}
 
 	void reconstructAvatar()
@@ -1263,7 +1306,7 @@ public:
 		std::vector<boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGBL>>> labeledPointClouds(mPointClouds.size());
 		for (int i = 0; i < mPointClouds.size(); i++)
 		{
-			LOG_S(INFO) << "Initial labeling and transformation " << i + 1 << "/" << mPointClouds.size() << " with " << mPointClouds[i].size() << " points";
+			LOG_S(INFO) << "Initial labeling and transformation " << i + 1 << "/" << mPointClouds.size() << " with " << mPointClouds[i]->size() << " points";
 			labeledPointClouds[i] = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBL>>();
 
 			Eigen::Vector4f centroid;
@@ -1293,22 +1336,22 @@ public:
 		// rigid registration
 		{
 			int totalNumPoints = 0;
-			std::vector<int> cloudOffsets(mPointClouds->size());
-			for(int i=0; i<mPointClouds->size(); i++)
+			std::vector<int> cloudOffsets(mPointClouds.size());
+			for(int i=0; i<mPointClouds.size(); i++)
 			{
 				cloudOffsets[i] = totalNumPoints;
 				totalNumPoints += mPointClouds[i]->size();
 			}
 
-			constexpr int maxIterations = 2;
+			constexpr int maxIterations = 1;
 			constexpr double errorBound = 0.05;
 
 			std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
 
 			LOG_SCOPE_F(INFO, "Starting rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
-			LOG_F(INFO, "%-5s | %-15s | %-15s | %-15s | %-15s | %-15s", "iter", "error", "kdtree time", "var time", "eq build", "eq solve");
+			LOG_F(INFO, "%-5s | %-15s | %-15s | %-15s | %-15s | %-15s | %-15s", "iter", "error", "kdtree time", "var time", "eq build", "eq solve", "gradient norm");
 
-			int iterations = 0;
+			int iteration = 0;
 			double error = 1.;
 
 			do
@@ -1324,83 +1367,116 @@ public:
 
 				// update variances
 				auto startTimeVariance = std::chrono::high_resolution_clock::now();
-				eigen::MatrixXd variances(mPointClouds->size(),mPointClouds->size());
-				for(int f = 0; f < mPointClouds->size(); f++)
+				Eigen::MatrixXd variances(mPointClouds.size(),mPointClouds.size());
+				for (int f = 0; f < mPointClouds.size(); f++)
 				{
-					for(int g = 0; g < mPointClouds->size(); g++)
+					for (int g = 0; g < mPointClouds.size(); g++)
 					{
-						variances(f,g) = calculateVariance(mPointClouds[f], kdtrees[g]);
+						variances(f, g) = calculateVariance<pcl::PointXYZRGBL>(labeledPointClouds[f], kdtrees[g]);
 					}
 				}
+				//LOG_S(INFO) << "Variance matrix: " << variances;
 				auto endTimeVariance = std::chrono::high_resolution_clock::now();
 				auto VarianceRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeVariance - startTimeVariance).count();
+
+				/*
+				Eigen::SparseMatrix<double> posteriorMatrix(totalNumPoints, totalNumPoints);
+				for (int f = 0; f < labeledPointClouds.size(); f++)
+				{
+					for (int g = 0; g < labeledPointClouds.size(); g++)
+					{
+						if (f != g)
+						{
+							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
+							{
+								auto numFoundPoints = kdtrees[g].nearestKSearch((*labeledPointClouds[f])[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+								for (int i = 0; i < numFoundPoints; i++)
+								{ ///@todo optimized posterior matrix calculation...
+									int m = pointIdxNKNSearch[i];
+									const auto& yfn = (*labeledPointClouds[f])[n];
+									const auto& ygm = (*labeledPointClouds[g])[m];
+									posteriorMatrix(cloudOffsets[f] + n, cloudOffsets[g] + m) = calculatePOld(yfn, ygm, kdtrees[g], variances(f, g));
+								}
+							}
+						}
+					}
+				}
+				*/
 
 				// build equation system
 				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
 				// rotations and translations = 6 paramters per frame
-				eigen::MatrixXd A = eigen::MatrixXd::Zero(6*totalNumPoints, 6*mPointClouds->size());
-				eigen::VectorXd b = eigen::VectorXd::Zero(6*totalNumPoints);
+				Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6*totalNumPoints, 6*mPointClouds.size());
+				Eigen::VectorXd b = Eigen::VectorXd::Zero(6*totalNumPoints);
 				std::vector<int> pointIdxNKNSearch(Nnear);
 				std::vector<float> pointNKNSquaredDistance(Nnear);
-				for(int f = 0; f < mPointClouds->size(); f++)
+				for(int f = 0; f < labeledPointClouds.size(); f++)
 				{
-					for(int g = 0; g < mPointClouds->size(); g++)
+					for(int g = 0; g < labeledPointClouds.size(); g++)
 					{
 						if(f!=g)
 						{
-							for(int n = 0; n < mPointClouds[f]->size(); n++)
+							
+							for(int n = 0; n < labeledPointClouds[f]->size(); n++)
 							{
-								auto numFoundPoints = kdtree[g].nearestKSearch(mPointClouds[f][fpoint], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+								auto numFoundPoints = kdtrees[g].nearestKSearch((*labeledPointClouds[f])[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+
 								for(int i = 0; i < numFoundPoints; i++)
 								{
 									int m = pointIdxNKNSearch[i];
-									double pOverVar = calculatePOld(n, m, kdtree[g], variances(f,g))/variance(f,g);
 
+									const auto& yfn = (*labeledPointClouds[f])[n];
+									const auto& ygm = (*labeledPointClouds[g])[m];
+
+									double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f,g))/variances(f,g);
 									int rowf = 6*(cloudOffsets[f]+n);
 									int rowg = 6*(cloudOffsets[g]+m);
 									int colf = 6*f;
-									int rowg = 6*g;
-
-									auto yfn = mPointClouds[f][n];
-									auto ygm = mPointClouds[g][m];
+									int colg = 6*g;
 
 									// fill A
 									// I3
-									A(rowf+0, colf+0) += 1*pOverVar;
-									A(rowf+1, colf+1) += 1*pOverVar;
-									A(rowf+2, colf+2) += 1*pOverVar;
-									// -I3
-									A(rowf+0, colf+0+3) += -1*pOverVar;
-									A(rowf+1, colf+1+3) += -1*pOverVar;
-									A(rowf+2, colf+2+3) += -1*pOverVar;
+									A(rowf + 0, colf + 0) += 1 * pOverVar;
+									A(rowf + 1, colf + 1) += 1 * pOverVar;
+									A(rowf + 2, colf + 2) += 1 * pOverVar;
 									// -y_f,n hat
-									A(rowf+0, colg+1+3) += -1*pOverVar*yfn.z; A(rowf+0, colg+2+3) += -1*pOverVar*-yfn.y;
-									A(rowf+1, colg+0+3) += -1*pOverVar*-yfn.z; A(rowf+1, colg+2+3) += -1*pOverVar*yfn.x;
-									A(rowf+2, colg+0+3) += -1*pOverVar*yfn.y; A(rowf+2, colg+1+3) += -1*pOverVar*-yfn.x;
-									// y_f,n hat
-									A(rowf+0, colg+1+3) += pOverVar*yfn.z; A(rowf+0, colg+2+3) += pOverVar*-yfn.y;
-									A(rowf+1, colg+0+3) += pOverVar*-yfn.z; A(rowf+1, colg+2+3) += pOverVar*yfn.x;
-									A(rowf+2, colg+0+3) += pOverVar*yfn.y; A(rowf+2, colg+1+3) += pOverVar*-yfn.x;
+									A(rowf + 0, colf + 1 + 3) += -1 * pOverVar*-yfn.z; A(rowf + 0, colf + 2 + 3) += -1 * pOverVar*yfn.y;
+									A(rowf + 1, colf + 0 + 3) += -1 * pOverVar*yfn.z;  A(rowf + 1, colf + 2 + 3) += -1 * pOverVar*-yfn.x;
+									A(rowf + 2, colf + 0 + 3) += -1 * pOverVar*-yfn.y; A(rowf + 2, colf + 1 + 3) += -1 * pOverVar*yfn.x;
+									// -I3
+									//A(rowf+0, colf+0+3) += -1*pOverVar;
+									//A(rowf+1, colf+1+3) += -1*pOverVar;
+									//A(rowf+2, colf+2+3) += -1*pOverVar;
+									A(rowf + 0, colg + 0 + 3) += -A(rowf + 0, colg + 0);
+									A(rowf + 1, colg + 1 + 3) += -A(rowf + 1, colg + 1);
+									A(rowf + 2, colg + 2 + 3) += -A(rowf + 2, colg + 2);
+									// y_g,m hat
+									A(rowf + 0, colg + 1 + 3) += pOverVar*-ygm.z; A(rowf + 0, colg + 2 + 3) += pOverVar*ygm.y;
+									A(rowf + 1, colg + 0 + 3) += pOverVar*ygm.z;  A(rowf + 1, colg + 2 + 3) += pOverVar*-ygm.x;
+									A(rowf + 2, colg + 0 + 3) += pOverVar*-ygm.y; A(rowf + 2, colg + 1 + 3) += pOverVar*ygm.x;
 									// next row
 									// y_f,n hat
-									A(rowg+0, colf+1) += pOverVar*yfn.z; A(rowg+0, colf+2) += pOverVar*-yfn.y;
-									A(rowg+1, colf+0) += pOverVar*-yfn.z; A(rowg+1, colf+2) += pOverVar*yfn.x;
-									A(rowg+2, colf+0) += pOverVar*yfn.y; A(rowg+2, colf+1) += pOverVar*-yfn.x;
-									// -y_f,n hat
-									A(rowg+0, colf+1+3) += -1*pOverVar*yfn.z; A(rowg+0, colf+2+3) += -1*pOverVar*-yfn.y;
-									A(rowg+1, colf+0+3) += -1*pOverVar*-yfn.z; A(rowg+1, colf+2+3) += -1*pOverVar*yfn.x;
-									A(rowg+2, colf+0+3) += -1*pOverVar*yfn.y; A(rowg+2, colf+1+3) += -1*pOverVar*-yfn.x;
+									A(rowg + 0, colf + 1) += pOverVar*-yfn.z; A(rowg + 0, colf + 2) += pOverVar*yfn.y;
+									A(rowg + 1, colf + 0) += pOverVar*yfn.z; A(rowg + 1, colf + 2) += pOverVar*-yfn.x;
+									A(rowg + 2, colf + 0) += pOverVar*-yfn.y; A(rowg + 2, colf + 1) += pOverVar*yfn.x;
 									// -y_f,n hat * y_f,n hat
-									A(rowg+0, colg+0) += -1*pOverVar*-(yfn.z*yfn.z+yfn.y*yfn.y); A(rowg+0, colf+1) += -1*pOverVar*yfn.x*yfn.y; A(rowg+0, colf+2) += -1*pOverVar*yfn.x*yfn.z;
-									A(rowg+1, colg+0) += -1*pOverVar*yfn.x*yfn.y; A(rowg+1, colf+1) += -1*pOverVar*-(yfn.x*yfn.x+yfn.z*yfn.z); A(rowg+1, colf+2) += -1*pOverVar*yfn.y*yfn.z;
-									A(rowg+2, colg+0) += -1*pOverVar*yfn.x*yfn.z; A(rowg+2, colf+1) += -1*pOverVar*yfn.y*yfn.z; A(rowg+2, colf+2) += -1*pOverVar*-(yfn.x*yfn.x+yfn.y*yfn.y);
+									A(rowg + 0, colf + 0 + 3) += -1 * pOverVar*-(yfn.z*yfn.z + yfn.y*yfn.y); A(rowg + 0, colf + 1 + 3) += -1 * pOverVar*yfn.x*yfn.y; A(rowg + 0, colf + 2 + 3) += -1 * pOverVar*yfn.x*yfn.z;
+									A(rowg + 1, colf + 0 + 3) += -1 * pOverVar*yfn.x*yfn.y; A(rowg + 1, colf + 1 + 3) += -1 * pOverVar*-(yfn.x*yfn.x + yfn.z*yfn.z); A(rowg + 1, colf + 2 + 3) += -1 * pOverVar*yfn.y*yfn.z;
+									A(rowg + 2, colf + 0 + 3) += -1 * pOverVar*yfn.x*yfn.z; A(rowg + 2, colf + 1 + 3) += -1 * pOverVar*yfn.y*yfn.z; A(rowg + 2, colf + 2 + 3) += -1 * pOverVar*-(yfn.x*yfn.x + yfn.y*yfn.y);
+									// -y_f,n hat
+									//A(rowg+0, colf+1+3) += -1*pOverVar*-yfn.z; A(rowg+0, colf+2+3) += -1*pOverVar*yfn.y;
+									//A(rowg+1, colf+0+3) += -1*pOverVar*yfn.z; A(rowg+1, colf+2+3) += -1*pOverVar*-yfn.x;
+									//A(rowg+2, colf+0+3) += -1*pOverVar*-yfn.y; A(rowg+2, colf+1+3) += -1*pOverVar*yfn.x;
+									A(rowg + 0, colg + 1 + 0) += -A(rowg + 0, colf + 1 + 0); A(rowg + 0, colg + 2 + 0) += -A(rowg + 0, colf + 2 + 0);
+									A(rowg + 1, colg + 0 + 0) += -A(rowg + 1, colf + 0 + 0); A(rowg + 1, colg + 2 + 0) += -A(rowg + 1, colf + 2 + 0);
+									A(rowg + 2, colg + 0 + 0) += -A(rowg + 2, colf + 0 + 0); A(rowg + 2, colg + 1 + 0) += -A(rowg + 2, colf + 1 + 0);
 									// y_f,n hat * y_g,m hat
-									A(rowg+0, colg+0+3) += pOverVar*-(ygm.z*yfn.z+ygm.y*yfn.y); A(rowg+0, colf+1+3) += pOverVar*ygm.x*yfn.y; A(rowg+0, colf+2+3) += pOverVar*ygm.x*yfn.z;
-									A(rowg+1, colg+0+3) += pOverVar*yfn.x*ygm.y; A(rowg+1, colf+1+3) += pOverVar*-(ygm.x*yfn.x+ygm.z*yfn.z); A(rowg+1, colf+2+3) += pOverVar*yfn.y*ygm.z;
-									A(rowg+2, colg+0+3) += pOverVar*yfn.x*ygm.z; A(rowg+2, colf+1+3) += pOverVar*yfn.y*ygm.z; A(rowg+2, colf+2+3) += pOverVar*-(ygm.x*yfn.x+ygm.y*yfn.y);
-
+									A(rowg + 0, colg + 0 + 3) += pOverVar*-(ygm.z*yfn.z + ygm.y*yfn.y); A(rowg + 0, colg + 1 + 3) += pOverVar*ygm.x*yfn.y; A(rowg + 0, colg + 2 + 3) += pOverVar*ygm.x*yfn.z;
+									A(rowg + 1, colg + 0 + 3) += pOverVar*yfn.x*ygm.y; A(rowg + 1, colg + 1 + 3) += pOverVar*-(ygm.x*yfn.x + ygm.z*yfn.z); A(rowg + 1, colg + 2 + 3) += pOverVar*ygm.y*yfn.z;
+									A(rowg + 2, colg + 0 + 3) += pOverVar*yfn.x*ygm.z; A(rowg + 2, colg + 1 + 3) += pOverVar*yfn.y*ygm.z; A(rowg + 2, colg + 2 + 3) += pOverVar*-(ygm.x*yfn.x + ygm.y*yfn.y);
+									
 									// fill b
-									b(rowf+0) += pOverVar*(ygm.x - yfn.x;)
+									b(rowf+0) += pOverVar*(ygm.x - yfn.x);
 									b(rowf+1) += pOverVar*(ygm.y - yfn.y);
 									b(rowf+2) += pOverVar*(ygm.z - yfn.z);
 
@@ -1415,17 +1491,51 @@ public:
 				auto endTimeEQBuild = std::chrono::high_resolution_clock::now();
 				auto EQBuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQBuild - startTimeEQBuild).count();
 
-
 				// solve equation system Ax=b to find rotation and translation deltas
 				auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
-				//auto delta = A.householderQR.solve(b);
+				Eigen::VectorXd delta = A.householderQr().solve(b);
 				auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
 				auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
 
+				for (int f = 0;f < labeledPointClouds.size();f++)
+				{
+					int transOffset = f * 6;
+					int rotOffset = f * 6 + 3;
+					
+					Eigen::Vector3d l(delta(rotOffset), delta(rotOffset+1), delta(rotOffset+2));
+					Eigen::Vector3d m(delta(transOffset), delta(transOffset + 1), delta(transOffset + 2));
+					double phi = l.norm();
+					Eigen::Matrix4d trafo = Eigen::Matrix4d::Identity();
+					if (phi > DBL_EPSILON || phi < -DBL_EPSILON)
+					{
+						double phi2 = phi*phi;
+						Eigen::Matrix3d lhat;
+						lhat << 0, -l(2), l(1),
+								l(2), 0, -l(0),
+								-l(1), l(0), 0;
+						auto lhat2 = lhat*lhat;
+						auto R = Eigen::Matrix3d::Identity() + lhat*sin(phi)/phi + lhat2*(1-cos(phi))/phi2; 
+						trafo(0, 0) = R(0, 0);trafo(0, 1) = R(0, 1);trafo(0, 2) = R(0, 2);
+						trafo(1, 0) = R(1, 0);trafo(1, 1) = R(1, 1);trafo(1, 2) = R(1, 2);
+						trafo(2, 0) = R(2, 0);trafo(2, 1) = R(2, 1);trafo(2, 2) = R(2, 2);
 
-				iterations++;
-				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i", iterations, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime);
-			} while (iterations < maxIterations && error > errorBound);
+						auto t = ((Eigen::Matrix3d::Identity() - R)*lhat*m+l*l.transpose()*m)/phi2;
+						trafo(0, 3) = t(0);
+						trafo(1, 3) = t(1);
+						trafo(2, 3) = t(2);
+					}
+					else
+					{
+						trafo(0, 3) = m(0);
+						trafo(1, 3) = m(1);
+						trafo(2, 3) = m(2);
+					}
+					pcl::transformPointCloud(*labeledPointClouds[f], *labeledPointClouds[f], trafo);
+				}
+
+				iteration++;
+				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i | %-15f", iteration, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime, delta.squaredNorm());
+			} while (iteration < maxIterations && error > errorBound);
 		}
 
 
@@ -1437,6 +1547,7 @@ public:
 		{
 			LOG_S(INFO) << "Merging " << i + 1 << "/" << mPointClouds.size() << std::endl;
 			completePointCloud += *labeledPointClouds[i];
+			pcl::copyPointCloud(*labeledPointClouds[i], *mPointClouds[i]);
 		}
 
 		std::string filename = "data/point_cloud_merged";
