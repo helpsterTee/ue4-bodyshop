@@ -355,6 +355,8 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <numeric>
 #include <algorithm>
 
+#include <omp.h> 
+
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/Eigenvalues>
@@ -362,6 +364,7 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <iostream>
 
 #include <pcl/common/projection_matrix.h>
+#include <pcl/common/geometry.h>
 #include <pcl/point_types.h>
 #include <pcl/registration/icp.h>
 #include <pcl/surface/poisson.h>
@@ -373,6 +376,7 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/segmentation/extract_clusters.h>
+#include <pcl/segmentation/supervoxel_clustering.h>
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/io/ply_io.h>
@@ -381,6 +385,15 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <opencv2/core/ocl.hpp>
 #include <opencv2/optflow.hpp>
 #include <opencv2/video.hpp>
+
+#include <opengm/graphicalmodel/graphicalmodel.hxx>
+#include <opengm/operations/adder.hxx>
+#include <opengm/operations/minimizer.hxx>
+#include <opengm/inference/graphcut.hxx>
+#include <opengm/inference/alphaexpansion.hxx>
+#include <opengm/inference/auxiliary/minstcutboost.hxx>
+#include <opengm/graphicalmodel/space/simplediscretespace.hxx>
+#include <opengm/functions/potts.hxx>
 
 constexpr int Nnear = 20;
 
@@ -1231,7 +1244,7 @@ public:
 	void downsamplePointClouds()
 	{
 		LOG_SCOPE_FUNCTION(INFO);
-		constexpr double leafsize = 0.025;
+		constexpr double leafsize = 0.05;
 		pcl::VoxelGrid<pcl::PointXYZRGB> sor;
 		sor.setLeafSize(leafsize, leafsize, leafsize);
 
@@ -1303,12 +1316,16 @@ public:
 		LOG_SCOPE_FUNCTION(INFO);
 
 		//  initial solution from capturing
+		///@todo need something better
 		std::vector<boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGBL>>> labeledPointClouds(mPointClouds.size());
 		for (int i = 0; i < mPointClouds.size(); i++)
 		{
 			LOG_S(INFO) << "Initial labeling and transformation " << i + 1 << "/" << mPointClouds.size() << " with " << mPointClouds[i]->size() << " points";
 			labeledPointClouds[i] = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBL>>();
+			labeledPointClouds[i]->resize(mPointClouds[i]->size());
 
+			// ------- initial registration --------
+			///@todo implement something better (e.g. spin image matching)
 			Eigen::Vector4f centroid;
 			pcl::compute3DCentroid(*mPointClouds[i], centroid);
 			float backsideRotation = (i >= mPointClouds.size() / 2) ? 0 : 180; //workaround for kinect 2 tracking (cannot detect backside properly)
@@ -1320,20 +1337,72 @@ public:
 			for (int idx = 0; idx < mPointClouds[i]->size(); idx++)
 			{
 				auto pt = mPointClouds[i]->at(idx);
-				pcl::PointXYZRGBL ptLabeled;
+				auto &ptLabeled = (*labeledPointClouds[i])[idx];
 				ptLabeled.x = pt.x;
 				ptLabeled.y = pt.y;
 				ptLabeled.z = pt.z;
 				ptLabeled.r = pt.r;
 				ptLabeled.g = pt.g;
 				ptLabeled.b = pt.b;
-				ptLabeled.label = i;
-				labeledPointClouds[i]->push_back(ptLabeled);
+			}
+
+			// -------- initial segmentation ----------
+			///@todo factor out this code, parametrize it an implement an automatic optimal parameter calculation
+			// use normal kernel
+			pcl::KdTreeFLANN<pcl::PointXYZRGB> kdtree;
+			kdtree.setInputCloud(mPointClouds[i]);
+			auto g = [](double x)->double {
+				return exp(-x / 2.) / 2.;
+			};
+			constexpr double bandwidth = 0.075;
+			constexpr double bandwidth2 = bandwidth*bandwidth;
+			constexpr double maxNumLabels = 50;
+			boost::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> peakCloud = boost::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+			peakCloud->resize(mPointClouds[i]->size());
+			std::vector<int> pointIdxNKNSearch(Nnear);
+			std::vector<float> pointNKNSquaredDistance(Nnear);
+			
+			#pragma omp parallel for
+			for (int idx = 0; idx < mPointClouds[i]->size(); idx++)
+			{
+				Eigen::Vector3d m;
+				auto &pt = (*mPointClouds[i])[idx];
+				Eigen::Vector3d x = { pt.x, pt.y, pt.z };
+				do
+				{
+					double sumg = 0.0;
+					Eigen::Vector3d sumxg = Eigen::Vector3d::Zero();
+					for (const auto &pt2 : (*mPointClouds[i]))
+					{
+						Eigen::Vector3d xi = { pt2.x, pt2.y, pt2.z };
+						double gval = g((x-xi).squaredNorm() / bandwidth2);
+						sumg += gval;
+						sumxg += gval*xi;
+					}
+					m = sumxg / sumg - x;
+					x = x + m;
+				} while (m.squaredNorm() > 0.000001);
+				(*peakCloud)[idx].x = x(0);
+				(*peakCloud)[idx].y = x(1);
+				(*peakCloud)[idx].z = x(2);
+			}
+			pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+			ec.setClusterTolerance(bandwidth);
+			ec.setMinClusterSize(mPointClouds[i]->size() / maxNumLabels);
+			ec.setMaxClusterSize(mPointClouds[i]->size());
+			ec.setInputCloud(peakCloud);
+			std::vector<pcl::PointIndices> cluster_indices;
+			ec.extract(cluster_indices);
+			for (int l = 0; l < cluster_indices.size(); l++)
+			{
+				for (auto idx : cluster_indices[l].indices)
+				{
+					(*labeledPointClouds[i])[idx].label = l;
+				}
 			}
 		}
 
-
-		// rigid registration
+		// ----------- rigid registration -------------
 		{
 			int totalNumPoints = 0;
 			std::vector<int> cloudOffsets(mPointClouds.size());
@@ -1368,6 +1437,7 @@ public:
 				// update variances
 				auto startTimeVariance = std::chrono::high_resolution_clock::now();
 				Eigen::MatrixXd variances(mPointClouds.size(),mPointClouds.size());
+				#pragma omp parallel for
 				for (int f = 0; f < mPointClouds.size(); f++)
 				{
 					for (int g = 0; g < mPointClouds.size(); g++)
@@ -1375,59 +1445,40 @@ public:
 						variances(f, g) = calculateVariance<pcl::PointXYZRGBL>(labeledPointClouds[f], kdtrees[g]);
 					}
 				}
-				//LOG_S(INFO) << "Variance matrix: " << variances;
 				auto endTimeVariance = std::chrono::high_resolution_clock::now();
 				auto VarianceRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeVariance - startTimeVariance).count();
 
-				/*
-				Eigen::SparseMatrix<double> posteriorMatrix(totalNumPoints, totalNumPoints);
-				for (int f = 0; f < labeledPointClouds.size(); f++)
-				{
-					for (int g = 0; g < labeledPointClouds.size(); g++)
-					{
-						if (f != g)
-						{
-							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
-							{
-								auto numFoundPoints = kdtrees[g].nearestKSearch((*labeledPointClouds[f])[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
-								for (int i = 0; i < numFoundPoints; i++)
-								{ ///@todo optimized posterior matrix calculation...
-									int m = pointIdxNKNSearch[i];
-									const auto& yfn = (*labeledPointClouds[f])[n];
-									const auto& ygm = (*labeledPointClouds[g])[m];
-									posteriorMatrix(cloudOffsets[f] + n, cloudOffsets[g] + m) = calculatePOld(yfn, ygm, kdtrees[g], variances(f, g));
-								}
-							}
-						}
-					}
-				}
-				*/
-
 				// build equation system
+				///@todo optimize via parallel reduction on gpu over each point (xyz)
 				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
 				// rotations and translations = 6 paramters per frame
-				Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6*totalNumPoints, 6*mPointClouds.size());
-				Eigen::VectorXd b = Eigen::VectorXd::Zero(6*totalNumPoints);
-				std::vector<int> pointIdxNKNSearch(Nnear);
-				std::vector<float> pointNKNSquaredDistance(Nnear);
+				Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(6*totalNumPoints, 6*mPointClouds.size());
+				Eigen::VectorXd b_ = Eigen::VectorXd::Zero(6*totalNumPoints);
 				for(int f = 0; f < labeledPointClouds.size(); f++)
 				{
+					#pragma omp parallel for
 					for(int g = 0; g < labeledPointClouds.size(); g++)
 					{
 						if(f!=g)
 						{
+							Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * totalNumPoints, 6 * mPointClouds.size());
+							Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * totalNumPoints);
+							std::vector<int> pointIdxNKNSearch(Nnear);
+							std::vector<float> pointNKNSquaredDistance(Nnear);
 							
 							for(int n = 0; n < labeledPointClouds[f]->size(); n++)
 							{
-								auto numFoundPoints = kdtrees[g].nearestKSearch((*labeledPointClouds[f])[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+								const auto& yfn = (*labeledPointClouds[f])[n];
+								auto numFoundPoints = kdtrees[g].nearestKSearch(yfn, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
 
 								for(int i = 0; i < numFoundPoints; i++)
 								{
 									int m = pointIdxNKNSearch[i];
 
-									const auto& yfn = (*labeledPointClouds[f])[n];
+									
 									const auto& ygm = (*labeledPointClouds[g])[m];
 
+									// No reason to precalculate "POld", as it get only calculated once with this implementation
 									double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f,g))/variances(f,g);
 									int rowf = 6*(cloudOffsets[f]+n);
 									int rowg = 6*(cloudOffsets[g]+m);
@@ -1474,16 +1525,21 @@ public:
 									A(rowg + 0, colg + 0 + 3) += pOverVar*-(ygm.z*yfn.z + ygm.y*yfn.y); A(rowg + 0, colg + 1 + 3) += pOverVar*ygm.x*yfn.y; A(rowg + 0, colg + 2 + 3) += pOverVar*ygm.x*yfn.z;
 									A(rowg + 1, colg + 0 + 3) += pOverVar*yfn.x*ygm.y; A(rowg + 1, colg + 1 + 3) += pOverVar*-(ygm.x*yfn.x + ygm.z*yfn.z); A(rowg + 1, colg + 2 + 3) += pOverVar*ygm.y*yfn.z;
 									A(rowg + 2, colg + 0 + 3) += pOverVar*yfn.x*ygm.z; A(rowg + 2, colg + 1 + 3) += pOverVar*yfn.y*ygm.z; A(rowg + 2, colg + 2 + 3) += pOverVar*-(ygm.x*yfn.x + ygm.y*yfn.y);
-									
-									// fill b
-									b(rowf+0) += pOverVar*(ygm.x - yfn.x);
-									b(rowf+1) += pOverVar*(ygm.y - yfn.y);
-									b(rowf+2) += pOverVar*(ygm.z - yfn.z);
 
-									b(rowg+0) += pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
-									b(rowg+1) += pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
-									b(rowg+2) += pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
+									// fill b
+									b(rowf + 0) += pOverVar*(ygm.x - yfn.x);
+									b(rowf + 1) += pOverVar*(ygm.y - yfn.y);
+									b(rowf + 2) += pOverVar*(ygm.z - yfn.z);
+
+									b(rowg + 0) += pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
+									b(rowg + 1) += pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
+									b(rowg + 2) += pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
 								}
+							}
+							#pragma omp critical
+							{
+								A_ += A;
+								b_ += b;
 							}
 						}
 					}
@@ -1493,7 +1549,7 @@ public:
 
 				// solve equation system Ax=b to find rotation and translation deltas
 				auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
-				Eigen::VectorXd delta = A.householderQr().solve(b);
+				Eigen::VectorXd delta = A_.householderQr().solve(b_);
 				auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
 				auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
 
@@ -1501,8 +1557,8 @@ public:
 				{
 					int transOffset = f * 6;
 					int rotOffset = f * 6 + 3;
-					
-					Eigen::Vector3d l(delta(rotOffset), delta(rotOffset+1), delta(rotOffset+2));
+
+					Eigen::Vector3d l(delta(rotOffset), delta(rotOffset + 1), delta(rotOffset + 2));
 					Eigen::Vector3d m(delta(transOffset), delta(transOffset + 1), delta(transOffset + 2));
 					double phi = l.norm();
 					Eigen::Matrix4d trafo = Eigen::Matrix4d::Identity();
@@ -1511,15 +1567,15 @@ public:
 						double phi2 = phi*phi;
 						Eigen::Matrix3d lhat;
 						lhat << 0, -l(2), l(1),
-								l(2), 0, -l(0),
-								-l(1), l(0), 0;
+							l(2), 0, -l(0),
+							-l(1), l(0), 0;
 						auto lhat2 = lhat*lhat;
-						auto R = Eigen::Matrix3d::Identity() + lhat*sin(phi)/phi + lhat2*(1-cos(phi))/phi2; 
+						auto R = Eigen::Matrix3d::Identity() + lhat*sin(phi) / phi + lhat2*(1 - cos(phi)) / phi2;
 						trafo(0, 0) = R(0, 0);trafo(0, 1) = R(0, 1);trafo(0, 2) = R(0, 2);
 						trafo(1, 0) = R(1, 0);trafo(1, 1) = R(1, 1);trafo(1, 2) = R(1, 2);
 						trafo(2, 0) = R(2, 0);trafo(2, 1) = R(2, 1);trafo(2, 2) = R(2, 2);
 
-						auto t = ((Eigen::Matrix3d::Identity() - R)*lhat*m+l*l.transpose()*m)/phi2;
+						auto t = ((Eigen::Matrix3d::Identity() - R)*lhat*m + l*l.transpose()*m) / phi2;
 						trafo(0, 3) = t(0);
 						trafo(1, 3) = t(1);
 						trafo(2, 3) = t(2);
@@ -1533,6 +1589,8 @@ public:
 					pcl::transformPointCloud(*labeledPointClouds[f], *labeledPointClouds[f], trafo);
 				}
 
+				///@todo recalculate error
+
 				iteration++;
 				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i | %-15f", iteration, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime, delta.squaredNorm());
 			} while (iteration < maxIterations && error > errorBound);
@@ -1540,6 +1598,35 @@ public:
 
 
 		// non-rigid registration
+		//nonrigidtest();
+		/*
+		{
+			constexpr int maxIterations = 1;
+			constexpr double errorBound = 0.05;
+
+			std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
+
+			LOG_SCOPE_F(INFO, "Starting rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
+			
+			do
+			{
+				// update kd tree
+				auto startTimeKDTree = std::chrono::high_resolution_clock::now();
+				for (int i = 0;i < kdtrees.size(); i++)
+				{
+					kdtrees[i].setInputCloud(labeledPointClouds[i]);
+				}
+				auto endTimeKDTree = std::chrono::high_resolution_clock::now();
+				auto KDTreeRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeKDTree - startTimeKDTree).count();
+
+				// http://www.andres.sc/publications/opengm-2.0.2-beta-manual.pdf
+				opengm::SimpleDiscreteSpace<> space();
+				// precompute components of Q for all y and f
+				// build graph
+				// execute alpha expansion
+			} while (0);
+		}
+		*/
 
 		// merge point clouds
 		pcl::PointCloud<pcl::PointXYZRGBL> completePointCloud;
@@ -1548,6 +1635,18 @@ public:
 			LOG_S(INFO) << "Merging " << i + 1 << "/" << mPointClouds.size() << std::endl;
 			completePointCloud += *labeledPointClouds[i];
 			pcl::copyPointCloud(*labeledPointClouds[i], *mPointClouds[i]);
+			std::string filename = "data/point_cloud_rigid_registered";
+			LOG_S(INFO) << "Saving back results...";
+			try {
+
+				pcl::io::savePLYFile(filename + ".ply", *labeledPointClouds[i]);
+				pcl::io::savePCDFile(filename + ".pcd", *labeledPointClouds[i]);
+				LOG_S(INFO) << "Successfully saved filtered point cloud to " << filename;
+			}
+			catch (std::runtime_error& ex) {
+				LOG_S(INFO) << "Exception converting image to point cloud format: " << ex.what();
+				return;
+			}
 		}
 
 		std::string filename = "data/point_cloud_merged";
@@ -1564,6 +1663,185 @@ public:
 		}
 	}
 
+
+	void initializeSegmentation()
+	{
+		std::vector<boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGBL>>> labeledPointClouds(1);
+		for (int i = 0; i < 1; i++)
+		{
+			LOG_S(INFO) << "Initial labeling" << i + 1 << "/" << mPointClouds.size() << " with " << mPointClouds[i]->size() << " points";
+			labeledPointClouds[i] = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBL>>();
+			for (int idx = 0; idx < mPointClouds[i]->size(); idx++)
+			{
+				auto pt = mPointClouds[i]->at(idx);
+				pcl::PointXYZRGBL ptLabeled;
+				ptLabeled.x = pt.x;
+				ptLabeled.y = pt.y;
+				ptLabeled.z = pt.z;
+				ptLabeled.r = pt.r;
+				ptLabeled.g = pt.g;
+				ptLabeled.b = pt.b;
+				ptLabeled.label = i;
+				labeledPointClouds[i]->push_back(ptLabeled);
+			}
+		}
+	}
+
+
+	void nonrigidtest(std::vector<Eigen::Matrix4d>& trafos)
+	{
+		std::vector<boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGBL>>> labeledPointClouds(mPointClouds.size());
+		for (int i = 0; i < labeledPointClouds.size(); i++)
+		{
+			LOG_S(INFO) << "Initial labeling" << i + 1 << "/" << mPointClouds.size() << " with " << mPointClouds[i]->size() << " points";
+			labeledPointClouds[i] = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBL>>();
+			for (int idx = 0; idx < mPointClouds[i]->size(); idx++)
+			{
+				auto pt = mPointClouds[i]->at(idx);
+				pcl::PointXYZRGBL ptLabeled;
+				ptLabeled.x = pt.x;
+				ptLabeled.y = pt.y;
+				ptLabeled.z = pt.z;
+				ptLabeled.r = pt.r;
+				ptLabeled.g = pt.g;
+				ptLabeled.b = pt.b;
+				ptLabeled.label = i;
+				labeledPointClouds[i]->push_back(ptLabeled);
+			}
+		}
+
+		constexpr int maxIterations = 1;
+		constexpr double errorBound = 0.05;
+
+		std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL>> kdtrees(labeledPointClouds.size());
+		std::vector<int> pointIdxNKNSearch(Nnear);
+		std::vector<float> pointNKNSquaredDistance(Nnear);
+		LOG_SCOPE_F(INFO, "Starting non-rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
+
+		do
+		{
+			// update kd tree
+			auto startTimeKDTree = std::chrono::high_resolution_clock::now();
+			for (int i = 0;i < kdtrees.size(); i++)
+			{
+				kdtrees[i].setInputCloud(labeledPointClouds[i]);
+			}
+			auto endTimeKDTree = std::chrono::high_resolution_clock::now();
+			auto KDTreeRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeKDTree - startTimeKDTree).count();
+
+			// update variance
+			auto startTimeVariance = std::chrono::high_resolution_clock::now();
+			Eigen::VectorXd variances(labeledPointClouds.size());
+			for (int f = 0; f < labeledPointClouds.size(); f++)
+			{
+				variances(f) = calculateVariance<pcl::PointXYZRGBL>(labeledPointClouds[f], kdtrees[f]);
+			}
+			auto endTimeVariance = std::chrono::high_resolution_clock::now();
+			auto VarianceRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeVariance - startTimeVariance).count();
+			// precompute components of Q for all y and f
+			// build graph (http://www.andres.sc/publications/opengm-2.0.2-beta-manual.pdf)
+			for (int f = 0; f < labeledPointClouds.size(); f++)
+			{
+				// def
+				auto &currentCloud = *labeledPointClouds[f];
+				typedef opengm::SimpleDiscreteSpace<> Space;
+				typedef opengm::meta::TypeListGenerator<opengm::ExplicitFunction<double>, opengm::PottsFunction<double>>::type FunctionTypeList;
+				typedef opengm::GraphicalModel<double, opengm::Adder, FunctionTypeList, Space> Model;
+				typedef opengm::MinSTCutBoost < size_t, double, opengm::PUSH_RELABEL > MinStCutType;
+				typedef opengm::GraphCut< Model, opengm::Minimizer, MinStCutType >	MinGraphCut;
+				typedef opengm::AlphaExpansion < Model, MinGraphCut > MinAlphaExpansion;
+
+				constexpr int numLabels = 20;
+
+				// build model
+				Space space(currentCloud.size(), numLabels);
+				Model gm(space);
+
+				// data term
+				for (int n = 0; n < currentCloud.size(); n++)
+				{
+					std::array<size_t, 1> shape = { numLabels };
+					opengm::ExplicitFunction<double> d(shape.begin(), shape.end());
+					//auto numFoundPoints = kdtrees[f].nearestKSearch(currentCloud[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+					double distSum = 0.0;
+					for (int m = 0; m < currentCloud.size(); m++)
+					{
+						Eigen::Vector3d yfn = { currentCloud[n].x ,currentCloud[n].y,currentCloud[n].z };
+						Eigen::Vector3d yfm = { currentCloud[m].x ,currentCloud[m].y,currentCloud[m].z };
+						distSum += exp((yfn-yfm).squaredNorm() / (-2 * variances(f)));
+						distSum += (yfn - yfm).squaredNorm();
+					}
+					std::array<size_t, 1> index = { n };
+					for (int l = 0;l < numLabels;l++)
+					{
+						d(l) = -log(distSum);
+					}
+					Model::FunctionIdentifier fidD = gm.addFunction(d);
+					gm.addFactor(fidD, index.begin(), index.end());
+				}
+
+				// regularization term
+				/*
+				opengm::PottsFunction<double> P(numLabels, numLabels, 0.0, 1.0);
+				Model::FunctionIdentifier fidP = gm.addFunction(P);
+				for (int n = 0; n < currentCloud.size(); n++)
+				{
+					for (int m = n+1; m < currentCloud.size(); m++)
+					{
+						std::array<size_t, 2> indices = { n, m };
+						gm.addFactor(fidP, indices.begin(), indices.end());
+					}
+				}
+				*/
+				opengm::PottsFunction<double> P(numLabels, numLabels, 0.0, 1.0);
+				Model::FunctionIdentifier fidP = gm.addFunction(P);
+				for (int n = 0; n < currentCloud.size(); n++)
+				{
+					auto numFoundPoints = kdtrees[f].nearestKSearch(currentCloud[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+					for (int i = 0; i < numFoundPoints; i++)
+					{
+						auto m = pointIdxNKNSearch[i];
+						if (m != n)
+						{
+							std::array<size_t, 2> indices = { n, m };
+							std::sort(indices.begin(), indices.end());
+							gm.addFactor(fidP, indices.begin(), indices.end());
+						}
+					}
+				}
+
+				// execute alpha expansion
+				MinAlphaExpansion ae(gm);
+				//ae.setStartingPoint();
+				ae.infer();
+				std::vector<size_t> labels(currentCloud.size());
+				ae.arg(labels);
+
+				for (int n = 0;n < labels.size();n++)
+				{
+					currentCloud[n].label = labels[n];
+				}
+
+				boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
+				viewer->setBackgroundColor(0, 0, 0);
+				viewer->addCoordinateSystem(1.0);
+
+				for (int curChunkIdx = 0; curChunkIdx < labeledPointClouds.size(); curChunkIdx++)
+				{
+					pcl::visualization::PointCloudColorHandlerLabelField<pcl::PointXYZRGBL> hlabel(labeledPointClouds[curChunkIdx]);
+					viewer->addPointCloud<pcl::PointXYZRGBL>(labeledPointClouds[curChunkIdx], hlabel, "sample cloud" + std::to_string(curChunkIdx));
+					viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "sample cloud");
+				}
+				viewer->initCameraParameters();
+
+				while (!viewer->wasStopped())
+				{
+					viewer->spinOnce(100);
+					boost::this_thread::sleep(boost::posix_time::microseconds(100000));
+				}
+			}
+		} while (0);
+	}
 
 
 	std::shared_ptr<RenderImage> calcDepthDeviation() const
@@ -1587,7 +1865,7 @@ public:
 	}
 
 
-	void loadCloudsFromDisk(fs::path dataFolder)
+	void loadFilteredPointCloudsFromDisk(fs::path dataFolder)
 	{
 		for (auto& p : fs::directory_iterator(dataFolder))
 		{
@@ -1599,7 +1877,29 @@ public:
 				{
 					auto index = stoi(filename.substr(12, indexPosEnd - 12));
 					LOG_S(INFO) << "Loading preprocessed point cloud " << index << " from file " << p;
-					if(pcl::io::loadPCDFile(p.path().generic_string(), *mPointClouds[index-1]) != -1)
+					if (pcl::io::loadPCDFile(p.path().generic_string(), *mPointClouds[index - 1]) != -1)
+					{
+						LOG_S(INFO) << "Loading successful!";
+					}
+					//else // error to cout by pcl
+				}
+			}
+		}
+	}
+
+	void loadLowResCloudsFromDisk(fs::path dataFolder)
+	{
+		for (auto& p : fs::directory_iterator(dataFolder))
+		{
+			if (p.path().has_filename())
+			{
+				auto filename = p.path().filename().generic_string();
+				auto indexPosEnd = filename.find("_downsampled.pcd");
+				if (filename.find("point_cloud_") == 0 && indexPosEnd != -1)
+				{
+					auto index = stoi(filename.substr(12, indexPosEnd - 12));
+					LOG_S(INFO) << "Loading preprocessed point cloud " << index << " from file " << p;
+					if (pcl::io::loadPCDFile(p.path().generic_string(), *mPointClouds[index - 1]) != -1)
 					{
 						LOG_S(INFO) << "Loading successful!";
 					}
@@ -1974,9 +2274,13 @@ int _main_(int _argc, char** _argv)
 						}
 						if (ImGui::Button("Load captured data"))
 						{
-							reconstruction.loadCloudsFromDisk("data");
+							reconstruction.loadFilteredPointCloudsFromDisk("data");
 						}
 						ImGui::SameLine();
+						if (ImGui::Button("Load test data"))
+						{
+							reconstruction.loadLowResCloudsFromDisk("data");
+						}
 						if (ImGui::Button("Register point clouds"))
 						{
 							reconstruction.reconstructAvatar();

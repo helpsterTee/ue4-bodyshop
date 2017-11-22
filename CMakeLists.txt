@@ -97,6 +97,12 @@ find_package(PCL 1.7 REQUIRED COMPONENTS common console features io registration
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
+# ----------------- opengm --------------------- #
+if( NOT opengm_DIR )
+	set( opengm_DIR "${CMAKE_CURRENT_SOURCE_DIR}/opengm" CACHE PATH "Location of opengm.")
+endif()
+target_include_directories(${PROJECT_NAME} PUBLIC ${opengm_DIR}/include)
+
 # ------------ put it all together ------------- #
 target_include_directories(${PROJECT_NAME}
     PUBLIC ${BX_DIR}/include ${BGFX_DIR}/include ${BGFX_COMMON_DIR} ${KINECT2_DIR}/inc ${PCL_INCLUDE_DIRS}
