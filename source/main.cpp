@@ -445,12 +445,11 @@ uint32_t getHighestLabel(boost::shared_ptr<pcl::PointCloud<PointT>> pointCloud)
 template<typename PointT> 
 std::vector<pcl::PointIndices> getLabelIndices(boost::shared_ptr<pcl::PointCloud<PointT>> pointCloud)
 {
-	std::vector<pcl::PointIndices> labelVector(getHighestLabel(pointCloud));
+	std::vector<pcl::PointIndices> labelVector(getHighestLabel(pointCloud)+1);
 	for (int i = 0; i < pointCloud->size(); i++)
 	{
 		const auto &pt = (*pointCloud)[i];
-		highestLabel = std::max(highestLabel, pt.label);
-		labelVector[pt.label].push_back(i);
+		labelVector[pt.label].indices.push_back(i);
 	}
 	return labelVector;
 }
@@ -1516,8 +1515,8 @@ public:
 				///@todo optimize via parallel reduction on gpu over each point (xyz)
 				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
 				// rotations and translations = 6 paramters per frame
-				Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(6*totalNumPoints, 6*mPointClouds.size());
-				Eigen::VectorXd b_ = Eigen::VectorXd::Zero(6*totalNumPoints);
+				Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(3 * totalNumPoints, 6*mPointClouds.size());
+				Eigen::VectorXd b_ = Eigen::VectorXd::Zero(3 * totalNumPoints);
 				for(int f = 0; f < labeledPointClouds.size(); f++)
 				{
 					#pragma omp parallel for
@@ -1525,8 +1524,8 @@ public:
 					{
 						if(f!=g)
 						{
-							Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * totalNumPoints, 6 * mPointClouds.size());
-							Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * totalNumPoints);
+							Eigen::MatrixXd A = Eigen::MatrixXd::Zero(3 * totalNumPoints, 6 * mPointClouds.size());
+							Eigen::VectorXd b = Eigen::VectorXd::Zero(3 * totalNumPoints);
 							std::vector<int> pointIdxNKNSearch(Nnear);
 							std::vector<float> pointNKNSquaredDistance(Nnear);
 							
@@ -1544,8 +1543,8 @@ public:
 
 									// No reason to precalculate "POld", as it get only calculated once with this implementation
 									double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f,g))/variances(f,g);
-									int rowf = 6*(cloudOffsets[f]+n);
-									int rowg = 6*(cloudOffsets[g]+m);
+									int rowf = 3*(cloudOffsets[f]+n);
+									int rowg = 3*(cloudOffsets[g]+m);
 									int colf = 6*f;
 									int colg = 6*g;
 
@@ -1650,8 +1649,25 @@ public:
 
 				error = delta.squaredNorm();
 				iteration++;
-				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i", iteration, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime);
+				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i", iteration, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime);
 			} while (iteration < maxIterations && error > errorBound);
+		}
+
+		boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
+		viewer->setBackgroundColor(0, 0, 0);
+		viewer->addCoordinateSystem(1.0);
+		for (int f = 0;f < 6;f++)
+		{
+			pcl::visualization::PointCloudColorHandlerLabelField<pcl::PointXYZRGBL> hlabel(labeledPointClouds[f]);
+			viewer->addPointCloud<pcl::PointXYZRGBL>(labeledPointClouds[f], hlabel, "sample cloud" + std::to_string(f));
+			viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "sample cloud" + std::to_string(f));			
+		}
+		viewer->initCameraParameters();
+
+		while (!viewer->wasStopped())
+		{
+			viewer->spinOnce(100);
+			boost::this_thread::sleep(boost::posix_time::microseconds(100000));
 		}
 
 		// non-rigid registration
@@ -1724,13 +1740,6 @@ public:
 	void nonrigidtest(std::vector<boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGBL>>> labeledPointClouds, std::vector<std::vector<pcl::PointIndices>> &cluster_indices)
 	{
 		std::vector<boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGBL>>> labeledPointCloudsTransformed(labeledPointClouds.size()); //helper cloud
-		//typedef std::tuple<pcl::PointXYZ, uint32_t, uint32_t, uint32_t> JointMeta; // position, label, other label, strength
-		typedef pcl::CentroidPoint<pcl::PointXYZ> CentroidXYZ;
-		std::vector< std::map<uint32_t, std::map<uint32_t, CentroidXYZ> > > jointEstimations(labeledPointClouds.size());
-
-		std::vector<int> pointIdxNKNSearch(5);
-		std::vector<float> pointNKNSquaredDistance(5);
-
 		for (int f = 0;f < labeledPointClouds.size();f++)
 		{
 			auto &currentCloud = *(labeledPointClouds[f]);
@@ -1738,180 +1747,488 @@ public:
 			// construct helper cloud
 			labeledPointCloudsTransformed[f] = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBL>>();
 			pcl::copyPointCloud(currentCloud, *(labeledPointCloudsTransformed[f]));
-
-			// approximate joint locations
-			pcl::KdTreeFLANN<pcl::PointXYZRGBL> kdtree;
-			kdtree.setInputCloud(labeledPointClouds[f]);
-			//search for "8-neighborhood" as we reconstructed these clouds from depth images...
-			for (int label = 0;label < cluster_indices[f].size(); label++)
-			{
-				for (const auto &index : cluster_indices[f][label].indices)
-				{
-					const auto point = currentCloud[index];
-					const auto numFoundPoints = kdtree.nearestKSearch(point, 5, pointIdxNKNSearch, pointNKNSquaredDistance);
-					for (int i = 0; i < numFoundPoints; i++ )
-					{
-						if (pointNKNSquaredDistance[i] == 0.0) continue;
-
-						const auto &otherIndex = pointIdxNKNSearch[i];
-						const auto &otherPoint = currentCloud[otherIndex];
-						const auto &otherLabel = otherPoint.label;
-						// we found an edge point
-						if (label != otherLabel)
-						{
-							auto smallerLabel = std::min<uint32_t>(label, otherPoint.label);
-							auto greaterLabel = std::max<uint32_t>(label, otherPoint.label);
-							jointEstimations[f][smallerLabel][greaterLabel].add(pcl::PointXYZ(point.x, point.y, point.z));
-							jointEstimations[f][smallerLabel][greaterLabel].add(pcl::PointXYZ(otherPoint.x, otherPoint.y, otherPoint.z));
-						}
-					}
-				}
-			}
 		}
 
-		constexpr int maxIterations = 1;
-		constexpr double errorBound = 0.01;
-
-		std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL>> kdtrees(labeledPointClouds.size());
-		//std::vector<int> pointIdxNKNSearch(Nnear);
-		//std::vector<float> pointNKNSquaredDistance(Nnear);
-		LOG_SCOPE_F(INFO, "Starting non-rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
-
-		do
 		{
-			// update kd tree
-			auto startTimeKDTree = std::chrono::high_resolution_clock::now();
-			#pragma omp parallel for
-			for (int i = 0;i < kdtrees.size(); i++)
+			constexpr int maxIterations = 6;
+			constexpr double alpha = 1.0;
+			constexpr double errorBound = 0.01;
+
+			std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL>> kdtrees(labeledPointClouds.size());
+			std::vector<int> pointIdxNKNSearch(Nnear);
+			std::vector<float> pointNKNSquaredDistance(Nnear);
+			LOG_SCOPE_F(INFO, "Starting non-rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
+
+			int totalNumPoints = 0;
+			std::vector<int> cloudOffsets(labeledPointClouds.size());
+			for (int i = 0; i<labeledPointClouds.size(); i++)
 			{
-				kdtrees[i].setInputCloud(labeledPointClouds[i]);
+				cloudOffsets[i] = totalNumPoints;
+				totalNumPoints += labeledPointClouds[i]->size();
 			}
-			auto endTimeKDTree = std::chrono::high_resolution_clock::now();
-			auto KDTreeRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeKDTree - startTimeKDTree).count();
 
-			// update variance
-			auto startTimeVariance = std::chrono::high_resolution_clock::now();
-			Eigen::VectorXd variances(labeledPointClouds.size());
-			#pragma omp parallel for
-			for (int f = 0; f < labeledPointClouds.size(); f++)
+			int iteration = 0;
+			double error = 1.0;
+			do
 			{
-				variances(f) = calculateVariance<pcl::PointXYZRGBL>(labeledPointClouds[f], kdtrees[f]);
-			}
-			auto endTimeVariance = std::chrono::high_resolution_clock::now();
-			auto VarianceRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeVariance - startTimeVariance).count();
-			
-			// precompute components of Q for all y and f
-			// build graph (http://www.andres.sc/publications/opengm-2.0.2-beta-manual.pdf)
-			for (int f = 0; f < labeledPointClouds.size(); f++)
-			{
-				/*
-				// def
-				auto &currentCloud = *labeledPointClouds[f];
-				typedef opengm::SimpleDiscreteSpace<> Space;
-				typedef opengm::meta::TypeListGenerator<opengm::ExplicitFunction<double>, opengm::PottsFunction<double>>::type FunctionTypeList;
-				typedef opengm::GraphicalModel<double, opengm::Adder, FunctionTypeList, Space> Model;
-				typedef opengm::MinSTCutBoost < size_t, double, opengm::PUSH_RELABEL > MinStCutType;
-				typedef opengm::GraphCut< Model, opengm::Minimizer, MinStCutType >	MinGraphCut;
-				typedef opengm::AlphaExpansion < Model, MinGraphCut > MinAlphaExpansion;
-
-				constexpr int numLabels = 20;
-
-				// build model
-				Space space(currentCloud.size(), numLabels);
-				Model gm(space);
-
-				// data term
-				for (int n = 0; n < currentCloud.size(); n++)
+				// Reestimate joint locations
+				typedef pcl::CentroidPoint<pcl::PointXYZ> CentroidXYZ;
+				std::vector< std::map<uint32_t, std::map<uint32_t, CentroidXYZ> > > jointEstimations(labeledPointClouds.size());
 				{
-					std::array<size_t, 1> shape = { numLabels };
-					opengm::ExplicitFunction<double> d(shape.begin(), shape.end());
-					//auto numFoundPoints = kdtrees[f].nearestKSearch(currentCloud[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
-					double distSum = 0.0;
-					for (int m = 0; m < currentCloud.size(); m++)
-					{
-						Eigen::Vector3d yfn = { currentCloud[n].x ,currentCloud[n].y,currentCloud[n].z };
-						Eigen::Vector3d yfm = { currentCloud[m].x ,currentCloud[m].y,currentCloud[m].z };
-						distSum += exp((yfn-yfm).squaredNorm() / (-2 * variances(f)));
-						distSum += (yfn - yfm).squaredNorm();
-					}
-					std::array<size_t, 1> index = { n };
-					for (int l = 0;l < numLabels;l++)
-					{
-						d(l) = -log(distSum);
-					}
-					Model::FunctionIdentifier fidD = gm.addFunction(d);
-					gm.addFactor(fidD, index.begin(), index.end());
-				}
+					std::vector<int> pointIdxNKNSearch(8); // "8-neighbourhood"
+					std::vector<float> pointNKNSquaredDistance(8);
 
-				// regularization term
-				opengm::PottsFunction<double> P(numLabels, numLabels, 0.0, 1.0);
-				Model::FunctionIdentifier fidP = gm.addFunction(P);
-				for (int n = 0; n < currentCloud.size(); n++)
-				{
-					auto numFoundPoints = kdtrees[f].nearestKSearch(currentCloud[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
-					for (int i = 0; i < numFoundPoints; i++)
+					for (int f = 0;f < labeledPointClouds.size();f++)
 					{
-						auto m = pointIdxNKNSearch[i];
-						if (m != n)
+						auto &currentCloud = *(labeledPointClouds[f]);
+
+						// approximate joint locations
+						pcl::KdTreeFLANN<pcl::PointXYZRGBL> kdtree;
+						kdtree.setInputCloud(labeledPointClouds[f]);
+						//search for "8-neighborhood" as we reconstructed these clouds from depth images...
+						for (int label = 0;label < cluster_indices[f].size(); label++)
 						{
-							std::array<size_t, 2> indices = { n, m };
-							std::sort(indices.begin(), indices.end());
-							gm.addFactor(fidP, indices.begin(), indices.end());
+							for (const auto &index : cluster_indices[f][label].indices)
+							{
+								const auto point = currentCloud[index];
+								const auto numFoundPoints = kdtree.nearestKSearch(point, 8, pointIdxNKNSearch, pointNKNSquaredDistance);
+								for (int i = 0; i < numFoundPoints; i++)
+								{
+									if (pointNKNSquaredDistance[i] == 0.0) continue;
+
+									const auto &otherIndex = pointIdxNKNSearch[i];
+									const auto &otherPoint = currentCloud[otherIndex];
+									const auto &otherLabel = otherPoint.label;
+									// we found an edge point
+									if (label != otherLabel)
+									{
+										auto smallerLabel = std::min<uint32_t>(label, otherPoint.label);
+										auto greaterLabel = std::max<uint32_t>(label, otherPoint.label);
+										jointEstimations[f][smallerLabel][greaterLabel].add(pcl::PointXYZ(point.x, point.y, point.z));
+										jointEstimations[f][smallerLabel][greaterLabel].add(pcl::PointXYZ(otherPoint.x, otherPoint.y, otherPoint.z));
+									}
+								}
+							}
 						}
 					}
 				}
 
-				// execute alpha expansion
-				MinAlphaExpansion ae(gm);
-				//ae.setStartingPoint();
-				ae.infer();
-				std::vector<size_t> labels(currentCloud.size());
-				ae.arg(labels);
-
-				for (int n = 0;n < labels.size();n++)
+				// update kd tree
+				auto startTimeKDTree = std::chrono::high_resolution_clock::now();
+				#pragma omp parallel for
+				for (int f = 0;f < kdtrees.size(); f++)
 				{
-					currentCloud[n].label = labels[n];
+					kdtrees[f].setInputCloud(labeledPointCloudsTransformed[f]);
+				}
+				auto endTimeKDTree = std::chrono::high_resolution_clock::now();
+				auto KDTreeRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeKDTree - startTimeKDTree).count();
+
+				// update variance
+				auto startTimeVariance = std::chrono::high_resolution_clock::now();
+				Eigen::VectorXd variances(labeledPointClouds.size());
+				#pragma omp parallel for
+				for (int f = 0; f < labeledPointClouds.size(); f++)
+				{
+					variances(f) = calculateVariance<pcl::PointXYZRGBL>(labeledPointCloudsTransformed[f], kdtrees[f]);
+				}
+				auto endTimeVariance = std::chrono::high_resolution_clock::now();
+				auto VarianceRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeVariance - startTimeVariance).count();
+
+				// acquire offsets and point indices
+				std::vector<std::vector<pcl::PointIndices>> labeledPoints(labeledPointClouds.size());
+				for (int f = 0; f<labeledPointClouds.size(); f++)
+				{
+					labeledPoints[f] = getLabelIndices(labeledPointClouds[f]);
+				}
+				std::vector<int> labelOffsets(labeledPointClouds.size());
+				std::vector<int> jointOffsets(labeledPointClouds.size());
+				int totalNumLabels = 0;
+				int totalNumJoints = 0;
+				for (int f = 0; f<labeledPointClouds.size(); f++)
+				{
+					labelOffsets[f] = totalNumLabels;
+					totalNumLabels += labeledPoints[f].size();
+					jointOffsets[f] = totalNumJoints;
+					for (auto const &ent1 : jointEstimations[f])
+					{
+						totalNumJoints += ent1.second.size();
+					}
+				}
+				
+				// precompute components of Q for all y and f
+				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
+				Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(3 * (totalNumPoints + 2*totalNumJoints), 6 * totalNumLabels );
+				Eigen::VectorXd b_ = Eigen::VectorXd::Zero(3 * (totalNumPoints + 2*totalNumJoints));
+				for (int f = 0; f < labeledPointClouds.size(); f++)
+				{
+					#pragma omp parallel for
+					for (int g = 0; g < labeledPointClouds.size(); g++)
+					{
+						if (f != g)
+						{
+							Eigen::MatrixXd A = Eigen::MatrixXd::Zero(3 * (totalNumPoints + 2*totalNumJoints), 6 * totalNumLabels);
+							Eigen::VectorXd b = Eigen::VectorXd::Zero(3 * (totalNumPoints + 2*totalNumJoints));
+							std::vector<int> pointIdxNKNSearch(Nnear);
+							std::vector<float> pointNKNSquaredDistance(Nnear);
+
+							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
+							{
+								const auto& yfn = (*labeledPointCloudsTransformed[f])[n];
+								auto numFoundPoints = kdtrees[g].nearestKSearch(yfn, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+
+								for (int i = 0; i < numFoundPoints; i++)
+								{
+									int m = pointIdxNKNSearch[i];
+
+									const auto& ygm = (*labeledPointCloudsTransformed[g])[m];
+
+									// No reason to precalculate "POld", as it get only calculated once with this implementation
+									const double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f, g)) / variances(f, g);
+									const int rowf = 3 * (cloudOffsets[f] + n);
+									const int rowg = 3 * (cloudOffsets[g] + m);
+									const int colf = 6 * (labelOffsets[f] + yfn.label);
+									const int colg = 6 * (labelOffsets[g] + ygm.label);
+
+
+									// fill A
+									///@todo use https://eigen.tuxfamily.org/dox/group__TutorialBlockOperations.html
+									// I3
+									A(rowf + 0, colf + 0) += 1 * pOverVar;
+									A(rowf + 1, colf + 1) += 1 * pOverVar;
+									A(rowf + 2, colf + 2) += 1 * pOverVar;
+									// -y_f,n hat
+									A(rowf + 0, colf + 1 + 3) += -1 * pOverVar*-yfn.z; A(rowf + 0, colf + 2 + 3) += -1 * pOverVar*yfn.y;
+									A(rowf + 1, colf + 0 + 3) += -1 * pOverVar*yfn.z;  A(rowf + 1, colf + 2 + 3) += -1 * pOverVar*-yfn.x;
+									A(rowf + 2, colf + 0 + 3) += -1 * pOverVar*-yfn.y; A(rowf + 2, colf + 1 + 3) += -1 * pOverVar*yfn.x;
+									// -I3
+									A(rowf + 0, colg + 0 + 3) += -A(rowf + 0, colg + 0);
+									A(rowf + 1, colg + 1 + 3) += -A(rowf + 1, colg + 1);
+									A(rowf + 2, colg + 2 + 3) += -A(rowf + 2, colg + 2);
+									// y_g,m hat
+									A(rowf + 0, colg + 1 + 3) += pOverVar*-ygm.z; A(rowf + 0, colg + 2 + 3) += pOverVar*ygm.y;
+									A(rowf + 1, colg + 0 + 3) += pOverVar*ygm.z;  A(rowf + 1, colg + 2 + 3) += pOverVar*-ygm.x;
+									A(rowf + 2, colg + 0 + 3) += pOverVar*-ygm.y; A(rowf + 2, colg + 1 + 3) += pOverVar*ygm.x;
+									// next row
+									// y_f,n hat
+									A(rowg + 0, colf + 1) += pOverVar*-yfn.z; A(rowg + 0, colf + 2) += pOverVar*yfn.y;
+									A(rowg + 1, colf + 0) += pOverVar*yfn.z; A(rowg + 1, colf + 2) += pOverVar*-yfn.x;
+									A(rowg + 2, colf + 0) += pOverVar*-yfn.y; A(rowg + 2, colf + 1) += pOverVar*yfn.x;
+									// -y_f,n hat * y_f,n hat
+									A(rowg + 0, colf + 0 + 3) += -1 * pOverVar*-(yfn.z*yfn.z + yfn.y*yfn.y); A(rowg + 0, colf + 1 + 3) += -1 * pOverVar*yfn.x*yfn.y; A(rowg + 0, colf + 2 + 3) += -1 * pOverVar*yfn.x*yfn.z;
+									A(rowg + 1, colf + 0 + 3) += -1 * pOverVar*yfn.x*yfn.y; A(rowg + 1, colf + 1 + 3) += -1 * pOverVar*-(yfn.x*yfn.x + yfn.z*yfn.z); A(rowg + 1, colf + 2 + 3) += -1 * pOverVar*yfn.y*yfn.z;
+									A(rowg + 2, colf + 0 + 3) += -1 * pOverVar*yfn.x*yfn.z; A(rowg + 2, colf + 1 + 3) += -1 * pOverVar*yfn.y*yfn.z; A(rowg + 2, colf + 2 + 3) += -1 * pOverVar*-(yfn.x*yfn.x + yfn.y*yfn.y);
+									// -y_f,n hat
+									A(rowg + 0, colg + 1 + 0) += -A(rowg + 0, colf + 1 + 0); A(rowg + 0, colg + 2 + 0) += -A(rowg + 0, colf + 2 + 0);
+									A(rowg + 1, colg + 0 + 0) += -A(rowg + 1, colf + 0 + 0); A(rowg + 1, colg + 2 + 0) += -A(rowg + 1, colf + 2 + 0);
+									A(rowg + 2, colg + 0 + 0) += -A(rowg + 2, colf + 0 + 0); A(rowg + 2, colg + 1 + 0) += -A(rowg + 2, colf + 1 + 0);
+									// y_f,n hat * y_g,m hat
+									A(rowg + 0, colg + 0 + 3) += pOverVar*-(ygm.z*yfn.z + ygm.y*yfn.y); A(rowg + 0, colg + 1 + 3) += pOverVar*ygm.x*yfn.y; A(rowg + 0, colg + 2 + 3) += pOverVar*ygm.x*yfn.z;
+									A(rowg + 1, colg + 0 + 3) += pOverVar*yfn.x*ygm.y; A(rowg + 1, colg + 1 + 3) += pOverVar*-(ygm.x*yfn.x + ygm.z*yfn.z); A(rowg + 1, colg + 2 + 3) += pOverVar*ygm.y*yfn.z;
+									A(rowg + 2, colg + 0 + 3) += pOverVar*yfn.x*ygm.z; A(rowg + 2, colg + 1 + 3) += pOverVar*yfn.y*ygm.z; A(rowg + 2, colg + 2 + 3) += pOverVar*-(ygm.x*yfn.x + ygm.y*yfn.y);
+
+									// fill b
+									b(rowf + 0) += pOverVar*(ygm.x - yfn.x);
+									b(rowf + 1) += pOverVar*(ygm.y - yfn.y);
+									b(rowf + 2) += pOverVar*(ygm.z - yfn.z);
+
+									b(rowg + 0) += pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
+									b(rowg + 1) += pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
+									b(rowg + 2) += pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
+								}
+							}
+
+							#pragma omp critical
+							{
+								A_ += A;
+								b_ += b;
+							}
+						}
+					}
+
+					int jointIndex = 0;
+					for (auto const &ent1 : jointEstimations[f])
+					{
+						for (auto const &ent2 : ent1.second)
+						{
+							const int row = 3 * (totalNumPoints + 2*(jointOffsets[f] + jointIndex));
+							const int cola = 6 * (labelOffsets[f] + ent1.first);
+							const int colb = 6 * (labelOffsets[f] + ent2.first);
+							if ((row + 6 >= A_.rows()) || (cola + 6 >= A_.cols()))
+							{
+								LOG_S(WARNING) << "Shit hits the fan at (a): " << row << "/" << A_.rows() << " " << cola << "/" << A_.cols();
+							}
+							if ((row + 6 >= A_.rows()) || (colb + 6 >= A_.cols()))
+							{
+								LOG_S(WARNING) << "Shit hits the fan at (b): " << row << "/" << A_.rows() << " " << colb << "/" << A_.cols();
+							}
+
+							const auto& jointCentroid = ent2.second;
+							pcl::PointXYZ yfab; 
+							jointCentroid.get(yfab);
+
+							A_(row + 0, cola + 0) += 1 * 2 * alpha;
+							A_(row + 1, cola + 1) += 1 * 2 * alpha;
+							A_(row + 2, cola + 2) += 1 * 2 * alpha;
+							// -y_f,ab hat
+							A_(row + 0, cola + 1 + 3) += -1 * 2 * alpha*-yfab.z; A_(row + 0, cola + 2 + 3) += -1 * 2 * alpha*yfab.y;
+							A_(row + 1, cola + 0 + 3) += -1 * 2 * alpha*yfab.z;  A_(row + 1, cola + 2 + 3) += -1 * 2 * alpha*-yfab.x;
+							A_(row + 2, cola + 0 + 3) += -1 * 2 * alpha*-yfab.y; A_(row + 2, cola + 1 + 3) += -1 * 2 * alpha*yfab.x;
+							// -I3
+							A_(row + 0, colb + 0 + 3) += -A_(row + 0, colb + 0);
+							A_(row + 1, colb + 1 + 3) += -A_(row + 1, colb + 1);
+							A_(row + 2, colb + 2 + 3) += -A_(row + 2, colb + 2);
+							// y_f,ab hat
+							A_(row + 0, colb + 1 + 3) += 2 * alpha*-yfab.z; A_(row + 0, colb + 2 + 3) += 2 * alpha*yfab.y;
+							A_(row + 1, colb + 0 + 3) += 2 * alpha*yfab.z;  A_(row + 1, colb + 2 + 3) += 2 * alpha*-yfab.x;
+							A_(row + 2, colb + 0 + 3) += 2 * alpha*-yfab.y; A_(row + 2, colb + 1 + 3) += 2 * alpha*yfab.x;
+							// next row
+							// y_f,ab hat
+							A_(row + 3 + 0, cola + 1) += 2 * alpha*-yfab.z; A_(row + 3 + 0, cola + 2) += 2 * alpha*yfab.y;
+							A_(row + 3 + 1, cola + 0) += 2 * alpha*yfab.z; A_(row + 3 + 1, cola + 2) += 2 * alpha*-yfab.x;
+							A_(row + 3 + 2, cola + 0) += 2 * alpha*-yfab.y; A_(row + 3 + 2, cola + 1) += 2 * alpha*yfab.x;
+							// -y_f,ab hat * y_f,ab hat
+							A_(row + 3 + 0, cola + 0 + 3) += -1 * 2 * alpha*-(yfab.z*yfab.z + yfab.y*yfab.y); A_(row + 3 + 0, cola + 1 + 3) += -1 * 2 * alpha*yfab.x*yfab.y; A_(row + 3 + 0, cola + 2 + 3) += -1 * 2 * alpha*yfab.x*yfab.z;
+							A_(row + 3 + 1, cola + 0 + 3) += -1 * 2 * alpha*yfab.x*yfab.y; A_(row + 3 + 1, cola + 1 + 3) += -1 * 2 * alpha*-(yfab.x*yfab.x + yfab.z*yfab.z); A_(row + 3 + 1, cola + 2 + 3) += -1 * 2 * alpha*yfab.y*yfab.z;
+							A_(row + 3 + 2, cola + 0 + 3) += -1 * 2 * alpha*yfab.x*yfab.z; A_(row + 3 + 2, cola + 1 + 3) += -1 * 2 * alpha*yfab.y*yfab.z; A_(row + 3 + 2, cola + 2 + 3) += -1 * 2 * alpha*-(yfab.x*yfab.x + yfab.y*yfab.y);
+							// y_f,ab hat
+							A_(row + 3 + 0, colb + 1 + 0) += -A_(row + 3 + 0, cola + 1 + 0); A_(row + 3 + 0, colb + 2 + 0) += -A_(row + 3 + 0, cola + 2 + 0);
+							A_(row + 3 + 1, colb + 0 + 0) += -A_(row + 3 + 1, cola + 0 + 0); A_(row + 3 + 1, colb + 2 + 0) += -A_(row + 3 + 1, cola + 2 + 0);
+							A_(row + 3 + 2, colb + 0 + 0) += -A_(row + 3 + 2, cola + 0 + 0); A_(row + 3 + 2, colb + 1 + 0) += -A_(row + 3 + 2, cola + 1 + 0);
+							// y_f,ab hat * y_f,ab hat
+							A_(row + 3 + 0, colb + 0 + 3) += 2 * alpha*-(yfab.z*yfab.z + yfab.y*yfab.y); A_(row + 3 + 0, colb + 1 + 3) += 2 * alpha*yfab.x*yfab.y; A_(row + 3 + 0, colb + 2 + 3) += 2 * alpha*yfab.x*yfab.z;
+							A_(row + 3 + 1, colb + 0 + 3) += 2 * alpha*yfab.x*yfab.y; A_(row + 3 + 1, colb + 1 + 3) += 2 * alpha*-(yfab.x*yfab.x + yfab.z*yfab.z); A_(row + 3 + 1, colb + 2 + 3) += 2 * alpha*yfab.y*yfab.z;
+							A_(row + 3 + 2, colb + 0 + 3) += 2 * alpha*yfab.x*yfab.z; A_(row + 3 + 2, colb + 1 + 3) += 2 * alpha*yfab.y*yfab.z; A_(row + 3 + 2, colb + 2 + 3) += 2 * alpha*-(yfab.x*yfab.x + yfab.y*yfab.y);
+
+							// fill b
+							b_(row + 0) += 0;
+							b_(row + 1) += 0;
+							b_(row + 2) += 0;
+
+							b_(row + 3 + 0) += 0;
+							b_(row + 3 + 1) += 0;
+							b_(row + 3 + 2) += 0;
+
+							jointIndex++;
+						}
+					}
+				}
+				const auto endTimeEQBuild = std::chrono::high_resolution_clock::now();
+				auto EQBuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQBuild - startTimeEQBuild).count();
+
+				// solve equation system Ax=b to find rotation and translation deltas
+				const auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
+				const Eigen::VectorXd delta = A_.householderQr().solve(b_);
+				const auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
+				const auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
+
+				for (int f = 0;f < labeledPointClouds.size();f++)
+				{
+					for (int label = 0; label < labeledPoints[f].size(); label++)
+					{
+						int transOffset = (labelOffsets[f] + label) * 6;
+						int rotOffset = (labelOffsets[f] + label) * 6 + 3;
+
+						Eigen::Vector3d l(delta(rotOffset), delta(rotOffset + 1), delta(rotOffset + 2));
+						Eigen::Vector3d m(delta(transOffset), delta(transOffset + 1), delta(transOffset + 2));
+						double phi = l.norm();
+						Eigen::Affine3d trafo = Eigen::Affine3d::Identity();
+						if (phi > DBL_EPSILON || phi < -DBL_EPSILON)
+						{
+							double phi2 = phi*phi;
+							Eigen::Matrix3d lhat;
+							lhat << 0, -l(2), l(1),
+								l(2), 0, -l(0),
+								-l(1), l(0), 0;
+							auto lhat2 = lhat*lhat;
+							auto R = Eigen::Matrix3d::Identity() + lhat*sin(phi) / phi + lhat2*(1 - cos(phi)) / phi2;
+							trafo(0, 0) = R(0, 0);trafo(0, 1) = R(0, 1);trafo(0, 2) = R(0, 2);
+							trafo(1, 0) = R(1, 0);trafo(1, 1) = R(1, 1);trafo(1, 2) = R(1, 2);
+							trafo(2, 0) = R(2, 0);trafo(2, 1) = R(2, 1);trafo(2, 2) = R(2, 2);
+
+							auto t = ((Eigen::Matrix3d::Identity() - R)*lhat*m + l*l.transpose()*m) / phi2;
+							trafo(0, 3) = t(0);
+							trafo(1, 3) = t(1);
+							trafo(2, 3) = t(2);
+						}
+						else
+						{
+							trafo(0, 3) = m(0);
+							trafo(1, 3) = m(1);
+							trafo(2, 3) = m(2);
+						}
+						
+						//pcl::transformPointCloud(*labeledPointCloudsTransformed[f], labeledPoints[f][label].indices, *labeledPointCloudsTransformed[f], trafo);// <- SHIT CRASHES
+						for (const auto &idx : labeledPoints[f][label].indices)
+						{
+							auto &pt = (*labeledPointCloudsTransformed[f])[idx];
+							Eigen::Vector3d pos = { pt.x, pt.y, pt.z };
+							pos = trafo*pos;
+							pt.x = pos(0);
+							pt.y = pos(1);
+							pt.z = pos(2);
+						}
+					}
+				}
+
+				error = delta.squaredNorm();
+				iteration++;
+				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i", iteration, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime);
+
+				// build graph (http://www.andres.sc/publications/opengm-2.0.2-beta-manual.pdf)
+				for (int f = 0; f < labeledPointClouds.size(); f++)
+				{
+					/*
+					// def
+					auto &currentCloud = *labeledPointClouds[f];
+					typedef opengm::SimpleDiscreteSpace<> Space;
+					typedef opengm::meta::TypeListGenerator<opengm::ExplicitFunction<double>, opengm::PottsFunction<double>>::type FunctionTypeList;
+					typedef opengm::GraphicalModel<double, opengm::Adder, FunctionTypeList, Space> Model;
+					typedef opengm::MinSTCutBoost < size_t, double, opengm::PUSH_RELABEL > MinStCutType;
+					typedef opengm::GraphCut< Model, opengm::Minimizer, MinStCutType >	MinGraphCut;
+					typedef opengm::AlphaExpansion < Model, MinGraphCut > MinAlphaExpansion;
+
+					constexpr int numLabels = 20;
+
+					// build model
+					Space space(currentCloud.size(), numLabels);
+					Model gm(space);
+
+					// data term
+					for (int n = 0; n < currentCloud.size(); n++)
+					{
+						std::array<size_t, 1> shape = { numLabels };
+						opengm::ExplicitFunction<double> d(shape.begin(), shape.end());
+						//auto numFoundPoints = kdtrees[f].nearestKSearch(currentCloud[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+						double distSum = 0.0;
+						for (int m = 0; m < currentCloud.size(); m++)
+						{
+							Eigen::Vector3d yfn = { currentCloud[n].x ,currentCloud[n].y,currentCloud[n].z };
+							Eigen::Vector3d yfm = { currentCloud[m].x ,currentCloud[m].y,currentCloud[m].z };
+							distSum += exp((yfn-yfm).squaredNorm() / (-2 * variances(f)));
+							distSum += (yfn - yfm).squaredNorm();
+						}
+						std::array<size_t, 1> index = { n };
+						for (int l = 0;l < numLabels;l++)
+						{
+							d(l) = -log(distSum);
+						}
+						Model::FunctionIdentifier fidD = gm.addFunction(d);
+						gm.addFactor(fidD, index.begin(), index.end());
+					}
+
+					// regularization term
+					opengm::PottsFunction<double> P(numLabels, numLabels, 0.0, 1.0);
+					Model::FunctionIdentifier fidP = gm.addFunction(P);
+					for (int n = 0; n < currentCloud.size(); n++)
+					{
+						auto numFoundPoints = kdtrees[f].nearestKSearch(currentCloud[n], Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+						for (int i = 0; i < numFoundPoints; i++)
+						{
+							auto m = pointIdxNKNSearch[i];
+							if (m != n)
+							{
+								std::array<size_t, 2> indices = { n, m };
+								std::sort(indices.begin(), indices.end());
+								gm.addFactor(fidP, indices.begin(), indices.end());
+							}
+						}
+					}
+
+					// execute alpha expansion
+					MinAlphaExpansion ae(gm);
+					//ae.setStartingPoint();
+					ae.infer();
+					std::vector<size_t> labels(currentCloud.size());
+					ae.arg(labels);
+
+					for (int n = 0;n < labels.size();n++)
+					{
+						currentCloud[n].label = labels[n];
+					}
+					*/
+
+
+					// show current cloud
+					/*
+					boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
+					viewer->setBackgroundColor(0, 0, 0);
+					viewer->addCoordinateSystem(1.0);
+					{
+						pcl::visualization::PointCloudColorHandlerLabelField<pcl::PointXYZRGBL> hlabel(labeledPointClouds[f]);
+						viewer->addPointCloud<pcl::PointXYZRGBL>(labeledPointClouds[f], hlabel, "sample cloud" + std::to_string(f));
+						viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "sample cloud" + std::to_string(f));
+						int runningIndex = 0;
+						for (auto &pt : *(labeledPointClouds[f]))
+						{
+							if (pt.label >= cluster_indices[f].size())
+							{
+								pcl::PointXYZ centroid = { pt.x, pt.y, pt.z };
+								viewer->addSphere(centroid, 0.015, "sphere-" + std::to_string(f) + "-" + std::to_string(runningIndex));
+								runningIndex++;
+							}
+
+						}
+						for (auto const &ent1 : jointEstimations[f])
+						{
+							for (auto const &ent2 : ent1.second)
+							{
+								pcl::PointXYZ centroid;
+								ent2.second.get(centroid);
+								viewer->addSphere(centroid, 0.025, "sphere-" + std::to_string(f) + "-" + std::to_string(ent1.first) + "-" + std::to_string(ent2.first));
+							}
+						}
+					}
+					viewer->initCameraParameters();
+
+					while (!viewer->wasStopped())
+					{
+						viewer->spinOnce(100);
+						boost::this_thread::sleep(boost::posix_time::microseconds(100000));st
+					}
+					*/
+				}
+			} while (iteration < maxIterations && error > errorBound);
+
+			// show result
+			boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
+			viewer->setBackgroundColor(0, 0, 0);
+			viewer->addCoordinateSystem(1.0);
+			for (int f = 0; f < labeledPointCloudsTransformed.size();f++)
+			{
+				pcl::visualization::PointCloudColorHandlerLabelField<pcl::PointXYZRGBL> hlabel(labeledPointCloudsTransformed[f]);
+				viewer->addPointCloud<pcl::PointXYZRGBL>(labeledPointCloudsTransformed[f], hlabel, "sample cloud" + std::to_string(f));
+				viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "sample cloud" + std::to_string(f));
+				int runningIndex = 0;
+				for (auto &pt : *(labeledPointCloudsTransformed[f]))
+				{
+					if (pt.label >= cluster_indices[f].size())
+					{
+						pcl::PointXYZ centroid = { pt.x, pt.y, pt.z };
+						viewer->addSphere(centroid, 0.015, "sphere-" + std::to_string(f) + "-" + std::to_string(runningIndex));
+						runningIndex++;
+					}
+
+				}
+				/*
+				for (auto const &ent1 : jointEstimations[f])
+				{
+					for (auto const &ent2 : ent1.second)
+					{
+						pcl::PointXYZ centroid;
+						ent2.second.get(centroid);
+						viewer->addSphere(centroid, 0.025, "sphere-" + std::to_string(f) + "-" + std::to_string(ent1.first) + "-" + std::to_string(ent2.first));
+					}
 				}
 				*/
-				boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
-				viewer->setBackgroundColor(0, 0, 0);
-				viewer->addCoordinateSystem(1.0);
-
-				// show current cloud
-				{
-					pcl::visualization::PointCloudColorHandlerLabelField<pcl::PointXYZRGBL> hlabel(labeledPointClouds[f]);
-					viewer->addPointCloud<pcl::PointXYZRGBL>(labeledPointClouds[f], hlabel, "sample cloud" + std::to_string(f));
-					viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "sample cloud" + std::to_string(f));
-					int runningIndex = 0;
-					for (auto &pt : *(labeledPointClouds[f]))
-					{
-						if (pt.label >= cluster_indices[f].size())
-						{
-							pcl::PointXYZ centroid = { pt.x, pt.y, pt.z };
-							viewer->addSphere(centroid, 0.015, "sphere-" + std::to_string(f) + "-" + std::to_string(runningIndex));
-							runningIndex++;
-						}
-
-					}
-					for (auto const &ent1 : jointEstimations[f]) 
-					{
-						for (auto const &ent2 : ent1.second) 
-						{
-							pcl::PointXYZ centroid;
-							ent2.second.get(centroid);
-							viewer->addSphere(centroid, 0.025, "sphere-" + std::to_string(f) + "-" + std::to_string(ent1.first) + "-" + std::to_string(ent2.first));
-						}
-					}
-				}
-				viewer->initCameraParameters();
-
-				while (!viewer->wasStopped())
-				{
-					viewer->spinOnce(100);
-					boost::this_thread::sleep(boost::posix_time::microseconds(100000));
-				}
 			}
-		} while (0);
+			viewer->initCameraParameters();
+
+			while (!viewer->wasStopped())
+			{
+				viewer->spinOnce(100);
+				boost::this_thread::sleep(boost::posix_time::microseconds(100000));
+			}
+		}
 	}
 
 
