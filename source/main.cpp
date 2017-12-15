@@ -397,12 +397,35 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 */
 constexpr int Nnear = 20;
 
-float angleForChunk(const int const current, const int total)
+std::string to_string_extended(int number, int width=5)
 {
+	std::stringstream numberString;
+	numberString << std::setfill('0')
+		<< std::setw(width)
+		<< std::to_string(number);
+	return numberString.str();
+}
+
+double angleForChunk(const int const current, const int total)
+{
+	return (current >= total/2 ? 0. : 180.) + (rand()%1);
 	//return static_cast<int>(2 * current * 100. / total) % 100 - 50.;
-	std::array<float, 4> angles = { -90., -45., 0., 45.};
+	//constexpr std::array<float, 4> angles = { -90., -45., 0., 45.};
+	constexpr std::array<float, 8> angles = { -90., -67.5, -45., -22.5, 0., 22.5, 45., 67.5};
+
 	assert(angles.max_size * 2 == total);
-	return angles[current % 3];
+	return angles[current % (total/2)];
+}
+
+template<typename T>
+Eigen::Matrix3d hat(const T& v)
+{
+	Eigen::Matrix3d vhat;
+	vhat <<
+		0, -v.z, v.y,
+		v.z, 0, -v.x,
+		-v.y, v.x, 0;
+	return vhat;
 }
 
 template<typename T>
@@ -692,18 +715,15 @@ public:
 			}
 
 			// write to file
-			std::stringstream filename;
-			filename << (dataFolder + "/raw_color_")
-			 << std::setfill('0')
-			 << std::setw(5)
-			 << std::to_string(imageIndex + 1)
-			 << ".png";
+			std::string filename = (dataFolder + "/raw_color_");
+			filename += to_string_extended(imageIndex + 1);
+			filename += ".png";
 			try {
-				cv::imwrite(filename.str().c_str(), cvColorImage);
-				LOG_S(INFO) << "Successfully saved raw color data to " << filename.str();
+				cv::imwrite(filename.c_str(), cvColorImage);
+				LOG_S(INFO) << "Successfully saved raw color data to " << filename;
 			}
 			catch (std::runtime_error& ex) {
-				LOG_S(ERROR) << "Exception converting " << filename.str() << " image to BMP format: " << ex.what();
+				LOG_S(ERROR) << "Exception converting " << filename << " image to BMP format: " << ex.what();
 				continue;
 			}
 
@@ -725,18 +745,15 @@ public:
 			}
 
 			// write to file
-			std::stringstream filename;
-			filename << (dataFolder + "/raw_depth_")
-			 << std::setfill('0')
-			 << std::setw(5)
-			 << std::to_string(imageIndex + 1)
-			 << ".png";
+			std::string filename = (dataFolder + "/raw_depth_");
+			filename += to_string_extended(imageIndex + 1);
+			filename += ".png";
 			try {
-				cv::imwrite(filename.str().c_str(), cvDepthImage);
-				LOG_S(INFO) << "Successfully saved raw depth data to " << filename.str();
+				cv::imwrite(filename.c_str(), cvDepthImage);
+				LOG_S(INFO) << "Successfully saved raw depth data to " << filename;
 			}
 			catch (std::runtime_error& ex) {
-				LOG_S(ERROR) << "Exception converting " << filename.str() << " image to BMP format: " << ex.what();
+				LOG_S(ERROR) << "Exception converting " << filename << " image to BMP format: " << ex.what();
 				continue;
 			}
 
@@ -758,18 +775,15 @@ public:
 			}
 
 			// write to file
-			std::stringstream filename;
-			filename << (dataFolder + "/raw_body_mask_")
-			 << std::setfill('0')
-			 << std::setw(5)
-			 << std::to_string(imageIndex + 1)
-			 << ".png";
+			std::string filename = (dataFolder + "/raw_body_mask_");
+			filename += to_string_extended(imageIndex + 1);
+			filename += ".png";
 			try {
-				cv::imwrite(filename.str().c_str(), cvBodyMask);
-				LOG_S(INFO) << "Successfully saved body mask data to " << filename.str();
+				cv::imwrite(filename.c_str(), cvBodyMask);
+				LOG_S(INFO) << "Successfully saved body mask data to " << filename;
 			}
 			catch (std::runtime_error& ex) {
-				LOG_S(ERROR) << "Exception converting " << filename.str() << " image to BMP format: " << ex.what();
+				LOG_S(ERROR) << "Exception converting " << filename << " image to BMP format: " << ex.what();
 				continue;
 			}
 
@@ -938,7 +952,7 @@ public:
 			cv::dilate(bodyHull[curChunkIdx], bodyHull[curChunkIdx], dilatationElement);
 			*/
 			// compute bounding boxes
-			bboxHighRes[curChunkIdx].first = cv::Point(KDP->ColorDataHeight()-1, KDP->ColorDataWidth()-1);
+			bboxHighRes[curChunkIdx].first = cv::Point(KDP->ColorDataHeight() - 1, KDP->ColorDataWidth() - 1);
 			bboxHighRes[curChunkIdx].second = cv::Point(0, 0);
 			for (int y = 0;y < KDP->ColorDataHeight(); y++)
 			{
@@ -955,20 +969,22 @@ public:
 			}
 
 			// save to file
-			std::string filename = "data/body_hull_";
-			filename += std::to_string(curChunkIdx + 1);
-			filename += ".png";
-			try {
-				cv::imwrite(filename.c_str(), bodyHull[curChunkIdx]);
-				LOG_S(INFO) << "Successfully saved body hull data to " << filename;
-			}
-			catch (std::runtime_error& ex) {
-				LOG_S(ERROR) << "Exception converting " << filename << " image to png format: " << ex.what();
-				continue;
+			{
+				std::string filename = "data/body_hull_";
+				filename += to_string_extended(curChunkIdx + 1);
+				filename += ".png";
+				try {
+					cv::imwrite(filename.c_str(), bodyHull[curChunkIdx]);
+					LOG_S(INFO) << "Successfully saved body hull data to " << filename;
+				}
+				catch (std::runtime_error& ex) {
+					LOG_S(ERROR) << "Exception converting " << filename << " image to png format: " << ex.what();
+					continue;
+				}
 			}
 			{
 				std::string filename = "data/low_body_hull_";
-				filename += std::to_string(curChunkIdx + 1);
+				filename += to_string_extended(curChunkIdx + 1);
 				filename += ".png";
 				try {
 					cv::imwrite(filename.c_str(), bodyHullLow);
@@ -1015,18 +1031,15 @@ public:
 					}
 				}
 				{
-					std::stringstream filename;
-					filename << ("data/cropped_color_")
-						<< std::setfill('0')
-						<< std::setw(5)
-						<< std::to_string(seriesImageIdx + 1)
-						<< ".png";
+					std::string filename = "data/cropped_color_";
+					filename += to_string_extended(seriesImageIdx + 1);
+					filename += ".png";
 					try {
-						cv::imwrite(filename.str().c_str(), cvColorImages[i]);
-						LOG_S(INFO) << "Successfully saved cropped color data to " << filename.str();
+						cv::imwrite(filename.c_str(), cvColorImages[i]);
+						LOG_S(INFO) << "Successfully saved cropped color data to " << filename;
 					}
 					catch (std::runtime_error& ex) {
-						LOG_S(ERROR) << "Exception converting " << filename.str() << " image to png format: " << ex.what();
+						LOG_S(ERROR) << "Exception converting " << filename << " image to png format: " << ex.what();
 						continue;
 					}
 				}
@@ -1045,18 +1058,15 @@ public:
 				}
 				cv::resize(cvDepthImage, cvDepthImages[i], cv::Size(bbLengthXHigh, bbLengthYHigh));
 				{
-					std::stringstream filename;
-					filename << ("data/cropped_depth_")
-						<< std::setfill('0')
-						<< std::setw(5)
-						<< std::to_string(seriesImageIdx + 1)
-						<< ".png";
+					std::string filename = "data/cropped_depth_";
+					filename += to_string_extended(seriesImageIdx + 1);
+					filename += ".png";
 					try {
-						cv::imwrite(filename.str().c_str(), cvDepthImages[i]);
-						LOG_S(INFO) << "Successfully cropped raw depth data to " << filename.str();
+						cv::imwrite(filename.c_str(), cvDepthImages[i]);
+						LOG_S(INFO) << "Successfully saved cropped depth data to " << filename;
 					}
 					catch (std::runtime_error& ex) {
-						LOG_S(ERROR) << "Exception converting " << filename.str() << " image to png format: " << ex.what();
+						LOG_S(ERROR) << "Exception converting " << filename << " image to png format: " << ex.what();
 						continue;
 					}
 				}
@@ -1233,7 +1243,7 @@ public:
 				*/
 				{
 					std::string filename = "data/superres_depth";
-					filename += std::to_string(curChunkIdx + 1);
+					filename += to_string_extended(curChunkIdx + 1);
 					filename += ".png";
 					try {
 						cv::imwrite(filename.c_str(), superresDepthImages[curChunkIdx]);
@@ -1337,12 +1347,12 @@ public:
 					auto& p = (*mPointClouds[curChunkIdx])[i];
 					p.x = ((p.x + bboxHighRes[curChunkIdx].first.x) / 1920. - 1.) * 3.6;
 					p.y = (1. - (p.y + bboxHighRes[curChunkIdx].first.y) / 1080.) * 2.;
-					p.z = p.z / 1000.;
+					p.z = p.z / 800.;
 				}
 
 				{
 					std::string filename = "data/raw_point_cloud_";
-					filename += std::to_string(curChunkIdx + 1);
+					filename += to_string_extended(curChunkIdx + 1);
 					try {
 						pcl::io::savePLYFile(filename + ".ply", *mPointClouds[curChunkIdx]);
 						pcl::io::savePCDFileBinary(filename + ".pcd", *mPointClouds[curChunkIdx]);
@@ -1423,7 +1433,7 @@ public:
 		viewer->setBackgroundColor(0, 0, 0);
 		viewer->addCoordinateSystem(1.0);
 
-		for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
+		for (int curChunkIdx = 0; curChunkIdx < mPointClouds.size(); curChunkIdx++)
 		{
 			pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGB> rgb(mPointClouds[curChunkIdx]);
 			viewer->addPointCloud<pcl::PointXYZRGB>(mPointClouds[curChunkIdx], rgb, "sample cloud" + std::to_string(curChunkIdx));
@@ -1501,7 +1511,7 @@ public:
 			mPointClouds[curChunkIdx] = cloud_filtered;
 			{
 				std::string filename = "data/point_cloud_";
-				filename += std::to_string(curChunkIdx + 1);
+				filename += to_string_extended(curChunkIdx + 1);
 				filename += "_filtered";
 				LOG_S(INFO) << "Saving filtered point cloud back to " << filename;
 				try {
@@ -1521,7 +1531,7 @@ public:
 	void downsamplePointClouds()
 	{
 		LOG_SCOPE_FUNCTION(INFO);
-		constexpr double leafsize = 0.05;
+		constexpr double leafsize = 0.03;
 
 		#pragma omp parallel for
 		for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
@@ -1536,7 +1546,7 @@ public:
 			mPointClouds[curChunkIdx] = cloud_filtered;
 			{
 				std::string filename = "data/point_cloud_";
-				filename += std::to_string(curChunkIdx + 1);
+				filename += to_string_extended(curChunkIdx + 1);
 				filename += "_downsampled";
 				LOG_S(INFO) << "Saving filtered point cloud back to " << filename;
 				try {
@@ -1590,6 +1600,37 @@ public:
 		return exp(distSquared/minus2variance) / sum;
 	}
 
+	void createBenchmarkProblem(int size = 10)
+	{
+		mPointClouds.resize(size);
+		for(auto &cloud : mPointClouds)
+		{
+			cloud = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+		}
+		constexpr double stepSize = 0.05;
+		for (double x = 0; x <= 1; x+= stepSize)
+		{
+			for (double y = 0;y <= 1; y+= stepSize)
+			{
+				pcl::PointXYZRGB p;
+				p.x = x;
+				p.y = y;
+				p.z = exp(-(x*x + y*y));
+				p.r = 255;
+				p.g = 0;
+				p.b = 0.;
+				mPointClouds[0]->push_back(p);
+			}
+		}
+		auto rotaxis = Eigen::Vector3d(0, 1, 0);
+		auto t = Eigen::Vector3d(0, 0, 0.1);
+		for (int f = 1;f < mPointClouds.size();f++)
+		{
+			Eigen::Affine3d trafo = Eigen::AngleAxisd((rand() % 6283) / 100. , rotaxis)*Eigen::Translation3d(t);
+			pcl::transformPointCloud(*mPointClouds[0], *mPointClouds[f], trafo);
+		}
+	}
+
 	void reconstructAvatar()
 	{
 		LOG_SCOPE_FUNCTION(INFO);
@@ -1630,6 +1671,27 @@ public:
 			
 		}
 
+		// Show initial solution
+		{
+			boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
+			viewer->setBackgroundColor(0, 0, 0);
+			viewer->addCoordinateSystem(1.0);
+
+			for (int curChunkIdx = 0; curChunkIdx < labeledPointClouds.size(); curChunkIdx++)
+			{
+				pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGBL> rgb(labeledPointClouds[curChunkIdx]);
+				viewer->addPointCloud<pcl::PointXYZRGBL>(labeledPointClouds[curChunkIdx], rgb, "sample cloud" + std::to_string(curChunkIdx));
+				//viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "sample cloud" + std::to_string(curChunkIdx));
+			}
+			viewer->initCameraParameters();
+
+			while (!viewer->wasStopped())
+			{
+				viewer->spinOnce(100);
+				boost::this_thread::sleep(boost::posix_time::microseconds(100000));
+			}
+		}
+
 		// ----------- rigid registration -------------
 		std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
 		{
@@ -1641,7 +1703,7 @@ public:
 				totalNumPoints += mPointClouds[i]->size();
 			}
 
-			constexpr int maxIterations = 1;
+			constexpr int maxIterations = 2;
 			constexpr double errorBound = 0.0001;
 
 			//std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
@@ -1686,16 +1748,12 @@ public:
 				#pragma omp parallel for
 				for(int f = 0; f < labeledPointClouds.size(); f++)
 				{
-					//Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * totalNumPoints, 6 * labeledPointClouds.size());
-					//Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * totalNumPoints);
-					const std::array<int, 2> neighbouringFrames = { (f + 1) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size() };
+					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
 					for(const auto g : neighbouringFrames )
 					//for (int g = 0;g < labeledPointClouds.size(); g++)
 					{
-						//if(g!=f)
+						if(g!=f)
 						{
-							//Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * totalNumPoints, 6 * mPointClouds.size());
-							//Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * totalNumPoints);
 							std::vector<int> pointIdxNKNSearch(Nnear);
 							std::vector<float> pointNKNSquaredDistance(Nnear);
 							
@@ -1703,9 +1761,8 @@ public:
 							{
 								const auto& yfn = (*labeledPointClouds[f])[n];
 								auto numFoundPoints = kdtrees[g].nearestKSearch(yfn, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
-
 								for(int i = 0; i < numFoundPoints; i++)
-								{									
+								{
 									const auto& ygm = (*labeledPointClouds[g])[pointIdxNKNSearch[i]];
 
 									// No reason to precalculate "POld", as it get only calculated once with this implementation
@@ -1715,42 +1772,28 @@ public:
 									int colf = 6*f;
 									int colg = 6*g;
 
+									Eigen::Matrix3d yfnhat = hat(yfn);
+									Eigen::Matrix3d ygmhat = hat(ygm);
+
 									// fill A
-									///@todo use https://eigen.tuxfamily.org/dox/group__TutorialBlockOperations.html
 									// I3
-									A(rowf + 0, colf + 0 + 0) += 1 * pOverVar;
-									A(rowf + 1, colf + 1 + 0) += 1 * pOverVar;
-									A(rowf + 2, colf + 2 + 0) += 1 * pOverVar;
+									A.block<3, 3>(rowf, colf) += pOverVar*Eigen::Matrix3d::Identity();
 									// -y_f,n hat
-									A(rowf + 0, colf + 1 + 3) += -1 * pOverVar*-yfn.z; A(rowf + 0, colf + 2 + 3) += -1 * pOverVar*yfn.y;
-									A(rowf + 1, colf + 0 + 3) += -1 * pOverVar*yfn.z;  A(rowf + 1, colf + 2 + 3) += -1 * pOverVar*-yfn.x;
-									A(rowf + 2, colf + 0 + 3) += -1 * pOverVar*-yfn.y; A(rowf + 2, colf + 1 + 3) += -1 * pOverVar*yfn.x;
-									// -I3
-									A(rowf + 0, colg + 0 + 3) += -1 * pOverVar;
-									A(rowf + 1, colg + 1 + 3) += -1 * pOverVar;
-									A(rowf + 2, colg + 2 + 3) += -1 * pOverVar;
+									A.block<3, 3>(rowf, colf+3) += -pOverVar*yfnhat;
+									// -I3 
+									A.block<3, 3>(rowf, colg) += -pOverVar*Eigen::Matrix3d::Identity();
 									// y_g,m hat
-									A(rowf + 0, colg + 1 + 3) += pOverVar*-ygm.z; A(rowf + 0, colg + 2 + 3) += pOverVar*ygm.y;
-									A(rowf + 1, colg + 0 + 3) += pOverVar*ygm.z;  A(rowf + 1, colg + 2 + 3) += pOverVar*-ygm.x;
-									A(rowf + 2, colg + 0 + 3) += pOverVar*-ygm.y; A(rowf + 2, colg + 1 + 3) += pOverVar*ygm.x;
+									A.block<3, 3>(rowf, colg+3) += pOverVar*ygmhat;
 									// next row
 									
 									// y_f,n hat
-									A(rowg + 0, colf + 1 + 0) += pOverVar*-yfn.z; A(rowg + 0, colf + 2 + 0) += pOverVar*yfn.y;
-									A(rowg + 1, colf + 0 + 0) += pOverVar*yfn.z;  A(rowg + 1, colf + 2 + 0) += pOverVar*-yfn.x;
-									A(rowg + 2, colf + 0 + 0) += pOverVar*-yfn.y; A(rowg + 2, colf + 1 + 0) += pOverVar*yfn.x;
-									// -y_f,n hat * y_f,n hat
-									A(rowg + 0, colf + 0 + 3) += -1 * pOverVar*-(yfn.z*yfn.z + yfn.y*yfn.y); A(rowg + 0, colf + 1 + 3) += -1 * pOverVar*yfn.x*yfn.y; A(rowg + 0, colf + 2 + 3) += -1 * pOverVar*yfn.x*yfn.z;
-									A(rowg + 1, colf + 0 + 3) += -1 * pOverVar*yfn.x*yfn.y; A(rowg + 1, colf + 1 + 3) += -1 * pOverVar*-(yfn.x*yfn.x + yfn.z*yfn.z); A(rowg + 1, colf + 2 + 3) += -1 * pOverVar*yfn.y*yfn.z;
-									A(rowg + 2, colf + 0 + 3) += -1 * pOverVar*yfn.x*yfn.z; A(rowg + 2, colf + 1 + 3) += -1 * pOverVar*yfn.y*yfn.z; A(rowg + 2, colf + 2 + 3) += -1 * pOverVar*-(yfn.x*yfn.x + yfn.y*yfn.y);
-									// -y_f,n hat
-									A(rowg + 0, colg + 1 + 0) += -pOverVar*-yfn.z; A(rowg + 0, colg + 2 + 0) += -pOverVar*yfn.y;
-									A(rowg + 1, colg + 0 + 0) += -pOverVar*yfn.z;  A(rowg + 1, colg + 2 + 0) += -pOverVar*-yfn.x;
-									A(rowg + 2, colg + 0 + 0) += -pOverVar*-yfn.y; A(rowg + 2, colg + 1 + 0) += -pOverVar*yfn.x;
-									// y_f,n hat * y_g,m hat
-									A(rowg + 0, colg + 0 + 3) += pOverVar*-(ygm.z*yfn.z + ygm.y*yfn.y); A(rowg + 0, colg + 1 + 3) += pOverVar*ygm.x*yfn.y; A(rowg + 0, colg + 2 + 3) += pOverVar*ygm.x*yfn.z;
-									A(rowg + 1, colg + 0 + 3) += pOverVar*yfn.x*ygm.y; A(rowg + 1, colg + 1 + 3) += pOverVar*-(ygm.x*yfn.x + ygm.z*yfn.z); A(rowg + 1, colg + 2 + 3) += pOverVar*ygm.y*yfn.z;
-									A(rowg + 2, colg + 0 + 3) += pOverVar*yfn.x*ygm.z; A(rowg + 2, colg + 1 + 3) += pOverVar*yfn.y*ygm.z; A(rowg + 2, colg + 2 + 3) += pOverVar*-(ygm.x*yfn.x + ygm.y*yfn.y);
+									A.block<3, 3>(rowg, colf) += pOverVar*yfnhat;
+									// -y_f,n hat * y_f,n hat ??
+									A.block<3, 3>(rowg, colf+3) += -pOverVar*yfnhat*yfnhat;
+									// -y_f,n hat -> -y_g,m hat ??
+									A.block<3, 3>(rowg, colg) += -pOverVar*yfnhat;
+									// y_f,n hat * y_g,m hat ??
+									A.block<3, 3>(rowg, colg+3) += pOverVar*yfnhat*ygmhat;
 
 									// fill b
 									b(rowf + 0) += pOverVar*(ygm.x - yfn.x);
@@ -1764,20 +1807,20 @@ public:
 							}
 						}
 					}
-					//#pragma omp critical
-					{
-						//A_ += A;
-						//b_ += b;
-					}
 				}
 				auto endTimeEQBuild = std::chrono::high_resolution_clock::now();
 				auto EQBuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQBuild - startTimeEQBuild).count();
-
+				
 				// solve equation system Ax=b to find rotation and translation deltas
 				auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
-				Eigen::VectorXd delta = A.householderQr().solve(b);
+				Eigen::VectorXd delta = A.fullPivHouseholderQr().solve(b);
 				auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
 				auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
+				error = delta.squaredNorm();
+				if (error > 100.) {
+					LOG_S(WARNING) << "Divergence detected. Stopping.";
+					break;
+				}
 
 				for (int f = 0;f < labeledPointClouds.size();f++)
 				{
@@ -1788,15 +1831,16 @@ public:
 					Eigen::Vector3d m(delta(transOffset), delta(transOffset + 1), delta(transOffset + 2));
 					double phi = l.norm();
 					Eigen::Affine3d trafo = Eigen::Affine3d::Identity();
-					if (phi > DBL_EPSILON || phi < -DBL_EPSILON)
+					if (phi > 0.0001 || phi < -0.0001)
 					{
 						double phi2 = phi*phi;
 						Eigen::Matrix3d lhat;
-						lhat << 0, -l(2), l(1),
+						lhat << 
+							0, -l(2), l(1),
 							l(2), 0, -l(0),
 							-l(1), l(0), 0;
 						auto lhat2 = lhat*lhat;
-						auto R = Eigen::Matrix3d::Identity() + lhat*sin(phi) / phi + lhat2*(1 - cos(phi)) / phi2;
+						auto R = Eigen::Matrix3d::Identity() + (lhat*sin(phi)) / phi + lhat2*(1 - cos(phi)) / phi2;
 						trafo(0, 0) = R(0, 0);trafo(0, 1) = R(0, 1);trafo(0, 2) = R(0, 2);
 						trafo(1, 0) = R(1, 0);trafo(1, 1) = R(1, 1);trafo(1, 2) = R(1, 2);
 						trafo(2, 0) = R(2, 0);trafo(2, 1) = R(2, 1);trafo(2, 2) = R(2, 2);
@@ -1815,7 +1859,6 @@ public:
 					pcl::transformPointCloud(*labeledPointClouds[f], *labeledPointClouds[f], trafo);
 				}
 
-				error = delta.squaredNorm();
 				iteration++;
 				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i", iteration, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime);
 			} while (iteration < maxIterations && error > errorBound);
@@ -1915,6 +1958,7 @@ public:
 				}
 			}
 		}
+		/*
 		for (int f = 0;f < labeledPointClouds.size();f++) 
 		{
 			boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
@@ -1946,37 +1990,44 @@ public:
 				viewer->spinOnce(100);
 				boost::this_thread::sleep(boost::posix_time::microseconds(100000));
 			}
+		}*/
+
+		{
+			pcl::PointCloud<pcl::PointXYZRGBL> completePointCloud;
+			for (int f = 0; f < labeledPointClouds.size(); f++)
+			{
+				LOG_S(INFO) << "Merging " << f + 1 << "/" << mPointClouds.size() << std::endl;
+				completePointCloud += *labeledPointClouds[f];
+				pcl::copyPointCloud(*labeledPointClouds[f], *mPointClouds[f]);
+				std::string filename = "data/point_cloud_rigid_registered" + to_string_extended(f);
+				LOG_S(INFO) << "Saving back results...";
+				try {
+
+					pcl::io::savePLYFile(filename + ".ply", *labeledPointClouds[f]);
+					pcl::io::savePCDFileBinary(filename + ".pcd", *labeledPointClouds[f]);
+					LOG_S(INFO) << "Successfully saved filtered point cloud to " << filename;
+				}
+				catch (std::runtime_error& ex) {
+					LOG_S(INFO) << "Exception converting image to point cloud format: " << ex.what();
+					return;
+				}
+			}
+			std::string filename = "data/point_cloud_rigid_merged";
+			LOG_S(INFO) << "Saving back results...";
+			try {
+
+				pcl::io::savePLYFile(filename + ".ply", completePointCloud);
+				pcl::io::savePCDFileBinary(filename + ".pcd", completePointCloud);
+				LOG_S(INFO) << "Successfully saved filtered point cloud to " << filename;
+			}
+			catch (std::runtime_error& ex) {
+				LOG_S(INFO) << "Exception converting image to point cloud format: " << ex.what();
+				return;
+			}
 		}
+
 		// non-rigid registration
 		nonrigidtest(labeledPointClouds, cluster_indices);
-		/*
-		{
-			constexpr int maxIterations = 1;
-			constexpr double errorBound = 0.05;
-
-			std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
-
-			LOG_SCOPE_F(INFO, "Starting rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
-			
-			do
-			{
-				// update kd tree
-				auto startTimeKDTree = std::chrono::high_resolution_clock::now();
-				for (int i = 0;i < kdtrees.size(); i++)
-				{
-					kdtrees[i].setInputCloud(labeledPointClouds[i]);
-				}
-				auto endTimeKDTree = std::chrono::high_resolution_clock::now();
-				auto KDTreeRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeKDTree - startTimeKDTree).count();
-
-				// http://www.andres.sc/publications/opengm-2.0.2-beta-manual.pdf
-				opengm::SimpleDiscreteSpace<> space();
-				// precompute components of Q for all y and f
-				// build graph
-				// execute alpha expansion
-			} while (0);
-		}
-		*/
 
 		// merge point clouds
 		pcl::PointCloud<pcl::PointXYZRGBL> completePointCloud;
@@ -1985,7 +2036,7 @@ public:
 			LOG_S(INFO) << "Merging " << f + 1 << "/" << mPointClouds.size() << std::endl;
 			completePointCloud += *labeledPointClouds[f];
 			pcl::copyPointCloud(*labeledPointClouds[f], *mPointClouds[f]);
-			std::string filename = "data/point_cloud_rigid_registered";
+			std::string filename = "data/point_cloud_nonrigid_registered" + to_string_extended(f);
 			LOG_S(INFO) << "Saving back results...";
 			try {
 
@@ -1999,7 +2050,7 @@ public:
 			}
 		}
 
-		std::string filename = "data/point_cloud_merged";
+		std::string filename = "data/point_cloud_nonrigid_merged";
 		LOG_S(INFO) << "Saving back results...";
 		try {
 
@@ -2026,7 +2077,7 @@ public:
 
 		{
 			constexpr int maxIterations = 2;
-			constexpr double alpha = 1.0;
+			constexpr double alpha = 10.0;
 			constexpr double errorBound = 0.01;
 
 			std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL>> kdtrees(labeledPointClouds.size());
@@ -2100,20 +2151,19 @@ public:
 				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
 				Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * (totalNumPoints + totalNumJoints), 6 * totalNumLabels );
 				Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * (totalNumPoints + totalNumJoints));
-				
+
+				#pragma omp parallel for
 				for (int f = 0; f < labeledPointClouds.size(); f++)
 				{
 					//const std::array<int, 2> neighbouringFrames = { (f + 1) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size() };
-					//for (const auto g : neighbouringFrames)
-					for (int g = 0; g < labeledPointClouds.size(); g++)
+					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
+					for (const auto g : neighbouringFrames)
+					//for (int g = 0; g < labeledPointClouds.size(); g++)
 					{
 						if(f!=g)
 						{
-							//Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * (totalNumPoints + totalNumJoints), 6 * totalNumLabels);
-							//Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * (totalNumPoints + totalNumJoints));
 							std::vector<int> pointIdxNKNSearch(Nnear);
 							std::vector<float> pointNKNSquaredDistance(Nnear);
-							#pragma omp parallel for
 							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
 							{
 								const auto& yfn = (*labeledPointCloudsTransformed[f])[n];
@@ -2133,41 +2183,28 @@ public:
 									const int colg = 6 * (labelOffsets[g] + ygm.label);
 
 
+									Eigen::Matrix3d yfnhat = hat(yfn);
+									Eigen::Matrix3d ygmhat = hat(ygm);
+
 									// fill A
-									///@todo use https://eigen.tuxfamily.org/dox/group__TutorialBlockOperations.html
 									// I3
-									A(rowf + 0, colf + 0 + 0) += 1 * pOverVar;
-									A(rowf + 1, colf + 1 + 0) += 1 * pOverVar;
-									A(rowf + 2, colf + 2 + 0) += 1 * pOverVar;
+									A.block<3, 3>(rowf, colf) += pOverVar*Eigen::Matrix3d::Identity();
 									// -y_f,n hat
-									A(rowf + 0, colf + 1 + 3) += -1 * pOverVar*-yfn.z; A(rowf + 0, colf + 2 + 3) += -1 * pOverVar*yfn.y;
-									A(rowf + 1, colf + 0 + 3) += -1 * pOverVar*yfn.z;  A(rowf + 1, colf + 2 + 3) += -1 * pOverVar*-yfn.x;
-									A(rowf + 2, colf + 0 + 3) += -1 * pOverVar*-yfn.y; A(rowf + 2, colf + 1 + 3) += -1 * pOverVar*yfn.x;
+									A.block<3, 3>(rowf, colf + 3) += -pOverVar*yfnhat;
 									// -I3
-									A(rowf + 0, colg + 0 + 3) += -1 * pOverVar;
-									A(rowf + 1, colg + 1 + 3) += -1 * pOverVar;
-									A(rowf + 2, colg + 2 + 3) += -1 * pOverVar;
+									A.block<3, 3>(rowf, colg) += -pOverVar*Eigen::Matrix3d::Identity();
 									// y_g,m hat
-									A(rowf + 0, colg + 1 + 3) += pOverVar*-ygm.z; A(rowf + 0, colg + 2 + 3) += pOverVar*ygm.y;
-									A(rowf + 1, colg + 0 + 3) += pOverVar*ygm.z;  A(rowf + 1, colg + 2 + 3) += pOverVar*-ygm.x;
-									A(rowf + 2, colg + 0 + 3) += pOverVar*-ygm.y; A(rowf + 2, colg + 1 + 3) += pOverVar*ygm.x;
+									A.block<3, 3>(rowf, colg + 3) += pOverVar*ygmhat;
 									// next row
+
 									// y_f,n hat
-									A(rowg + 0, colf + 1 + 0) += pOverVar*-yfn.z; A(rowg + 0, colf + 2 + 0) += pOverVar*yfn.y;
-									A(rowg + 1, colf + 0 + 0) += pOverVar*yfn.z;  A(rowg + 1, colf + 2 + 0) += pOverVar*-yfn.x;
-									A(rowg + 2, colf + 0 + 0) += pOverVar*-yfn.y; A(rowg + 2, colf + 1 + 0) += pOverVar*yfn.x;
-									// -y_f,n hat * y_f,n hat
-									A(rowg + 0, colf + 0 + 3) += -1 * pOverVar*-(yfn.z*yfn.z + yfn.y*yfn.y); A(rowg + 0, colf + 1 + 3) += -1 * pOverVar*yfn.x*yfn.y; A(rowg + 0, colf + 2 + 3) += -1 * pOverVar*yfn.x*yfn.z;
-									A(rowg + 1, colf + 0 + 3) += -1 * pOverVar*yfn.x*yfn.y; A(rowg + 1, colf + 1 + 3) += -1 * pOverVar*-(yfn.x*yfn.x + yfn.z*yfn.z); A(rowg + 1, colf + 2 + 3) += -1 * pOverVar*yfn.y*yfn.z;
-									A(rowg + 2, colf + 0 + 3) += -1 * pOverVar*yfn.x*yfn.z; A(rowg + 2, colf + 1 + 3) += -1 * pOverVar*yfn.y*yfn.z; A(rowg + 2, colf + 2 + 3) += -1 * pOverVar*-(yfn.x*yfn.x + yfn.y*yfn.y);
+									A.block<3, 3>(rowg, colf) += pOverVar*yfnhat;
+									// -y_f,n hat * y_f,n hat 
+									A.block<3, 3>(rowg, colf + 3) += -pOverVar*yfnhat*yfnhat;
 									// -y_f,n hat
-									A(rowg + 0, colg + 1 + 0) += -pOverVar*-yfn.z; A(rowg + 0, colg + 2 + 0) += -pOverVar*yfn.y;
-									A(rowg + 1, colg + 0 + 0) += -pOverVar*yfn.z;  A(rowg + 1, colg + 2 + 0) += -pOverVar*-yfn.x;
-									A(rowg + 2, colg + 0 + 0) += -pOverVar*-yfn.y; A(rowg + 2, colg + 1 + 0) += -pOverVar*yfn.x;
+									A.block<3, 3>(rowg, colg) += -pOverVar*yfnhat;
 									// y_f,n hat * y_g,m hat
-									A(rowg + 0, colg + 0 + 3) += pOverVar*-(ygm.z*yfn.z + ygm.y*yfn.y); A(rowg + 0, colg + 1 + 3) += pOverVar*ygm.x*yfn.y; A(rowg + 0, colg + 2 + 3) += pOverVar*ygm.x*yfn.z;
-									A(rowg + 1, colg + 0 + 3) += pOverVar*yfn.x*ygm.y; A(rowg + 1, colg + 1 + 3) += pOverVar*-(ygm.x*yfn.x + ygm.z*yfn.z); A(rowg + 1, colg + 2 + 3) += pOverVar*ygm.y*yfn.z;
-									A(rowg + 2, colg + 0 + 3) += pOverVar*yfn.x*ygm.z; A(rowg + 2, colg + 1 + 3) += pOverVar*yfn.y*ygm.z; A(rowg + 2, colg + 2 + 3) += pOverVar*-(ygm.x*yfn.x + ygm.y*yfn.y);
+									A.block<3, 3>(rowg, colg + 3) += pOverVar*yfnhat*ygmhat;
 
 									// fill b
 									b(rowf + 0) += pOverVar*(ygm.x - yfn.x);
@@ -2179,15 +2216,9 @@ public:
 									b(rowg + 2) += pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
 								}
 							}
-
-							//#pragma omp critical
-							{
-								//A_ += A;
-								//b_ += b;
-							}
 						}
 					}
-
+					
 					int jointIndex = 0;
 					for (auto const &ent1 : jointEstimations[f])
 					{
@@ -2200,39 +2231,23 @@ public:
 							const auto& jointCentroid = ent2.second;
 							pcl::PointXYZ yfab; 
 							jointCentroid.get(yfab);
-
-							A(row + 0, cola + 0 + 0) += 1 * 2 * alpha;
-							A(row + 1, cola + 1 + 0) += 1 * 2 * alpha;
-							A(row + 2, cola + 2 + 0) += 1 * 2 * alpha;
+							auto yfabhat = hat(yfab);
+							A.block<3, 3>(row, cola) += 2 * alpha*Eigen::Matrix3d::Identity();
 							// -y_f,ab hat
-							A(row + 0, cola + 1 + 3) += -1 * 2 * alpha*-yfab.z; A(row + 0, cola + 2 + 3) += -1 * 2 * alpha*yfab.y;
-							A(row + 1, cola + 0 + 3) += -1 * 2 * alpha*yfab.z;  A(row + 1, cola + 2 + 3) += -1 * 2 * alpha*-yfab.x;
-							A(row + 2, cola + 0 + 3) += -1 * 2 * alpha*-yfab.y; A(row + 2, cola + 1 + 3) += -1 * 2 * alpha*yfab.x;
+							A.block<3, 3>(row, cola + 3) += -2 * alpha*yfabhat;
 							// -I3
-							A(row + 0, colb + 0 + 0) += -1 * 2 * alpha;
-							A(row + 1, colb + 1 + 0) += -1 * 2 * alpha;
-							A(row + 2, colb + 2 + 0) += -1 * 2 * alpha;
+							A.block<3, 3>(row, colb) += -2 * alpha*Eigen::Matrix3d::Identity();
 							// y_f,ab hat
-							A(row + 0, colb + 1 + 3) += 2 * alpha*-yfab.z; A(row + 0, colb + 2 + 3) += 2 * alpha*yfab.y;
-							A(row + 1, colb + 0 + 3) += 2 * alpha*yfab.z;  A(row + 1, colb + 2 + 3) += 2 * alpha*-yfab.x;
-							A(row + 2, colb + 0 + 3) += 2 * alpha*-yfab.y; A(row + 2, colb + 1 + 3) += 2 * alpha*yfab.x;
+							A.block<3, 3>(row, colb + 3) += 2 * alpha*yfabhat;
 							// next row
 							// y_f,ab hat
-							A(row + 3 + 0, cola + 1 + 0) += 2 * alpha*-yfab.z; A(row + 3 + 0, cola + 2) += 2 * alpha*yfab.y;
-							A(row + 3 + 1, cola + 0 + 0) += 2 * alpha*yfab.z;  A(row + 3 + 1, cola + 2) += 2 * alpha*-yfab.x;
-							A(row + 3 + 2, cola + 0 + 0) += 2 * alpha*-yfab.y; A(row + 3 + 2, cola + 1) += 2 * alpha*yfab.x;
+							A.block<3, 3>(row+3, cola) += 2 * alpha*yfabhat;
 							// -y_f,ab hat * y_f,ab hat
-							A(row + 3 + 0, cola + 0 + 3) += -1 * 2 * alpha*-(yfab.z*yfab.z + yfab.y*yfab.y); A(row + 3 + 0, cola + 1 + 3) += -1 * 2 * alpha*yfab.x*yfab.y; A(row + 3 + 0, cola + 2 + 3) += -1 * 2 * alpha*yfab.x*yfab.z;
-							A(row + 3 + 1, cola + 0 + 3) += -1 * 2 * alpha*yfab.x*yfab.y; A(row + 3 + 1, cola + 1 + 3) += -1 * 2 * alpha*-(yfab.x*yfab.x + yfab.z*yfab.z); A(row + 3 + 1, cola + 2 + 3) += -1 * 2 * alpha*yfab.y*yfab.z;
-							A(row + 3 + 2, cola + 0 + 3) += -1 * 2 * alpha*yfab.x*yfab.z; A(row + 3 + 2, cola + 1 + 3) += -1 * 2 * alpha*yfab.y*yfab.z; A(row + 3 + 2, cola + 2 + 3) += -1 * 2 * alpha*-(yfab.x*yfab.x + yfab.y*yfab.y);
-							// y_f,ab hat
-							A(row + 3 + 0, colb + 1 + 0) += -2 * alpha*-yfab.z; A(row + 3 + 0, colb + 2 + 0) += -2 * alpha*yfab.y;
-							A(row + 3 + 1, colb + 0 + 0) += -2 * alpha*yfab.z;  A(row + 3 + 1, colb + 2 + 0) += -2 * alpha*-yfab.x;
-							A(row + 3 + 2, colb + 0 + 0) += -2 * alpha*-yfab.y; A(row + 3 + 2, colb + 1 + 0) += -2 * alpha*yfab.x;
+							A.block<3, 3>(row+3, cola + 3) += -2 * alpha*yfabhat*yfabhat;
+							// -y_f,ab hat
+							A.block<3, 3>(row+3, colb ) += -2 * alpha*yfabhat;
 							// y_f,ab hat * y_f,ab hat
-							A(row + 3 + 0, colb + 0 + 3) += 2 * alpha*-(yfab.z*yfab.z + yfab.y*yfab.y); A(row + 3 + 0, colb + 1 + 3) += 2 * alpha*yfab.x*yfab.y; A(row + 3 + 0, colb + 2 + 3) += 2 * alpha*yfab.x*yfab.z;
-							A(row + 3 + 1, colb + 0 + 3) += 2 * alpha*yfab.x*yfab.y; A(row + 3 + 1, colb + 1 + 3) += 2 * alpha*-(yfab.x*yfab.x + yfab.z*yfab.z); A(row + 3 + 1, colb + 2 + 3) += 2 * alpha*yfab.y*yfab.z;
-							A(row + 3 + 2, colb + 0 + 3) += 2 * alpha*yfab.x*yfab.z; A(row + 3 + 2, colb + 1 + 3) += 2 * alpha*yfab.y*yfab.z; A(row + 3 + 2, colb + 2 + 3) += 2 * alpha*-(yfab.x*yfab.x + yfab.y*yfab.y);
+							A.block<3, 3>(row+3, colb + 3) += 2 * alpha*yfabhat*yfabhat;
 
 							// fill b
 							b(row + 0) += 0;
@@ -2252,9 +2267,15 @@ public:
 
 				// solve equation system Ax=b to find rotation and translation deltas
 				const auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
-				const Eigen::VectorXd delta = A.householderQr().solve(b);
+				const Eigen::VectorXd delta = A.fullPivHouseholderQr().solve(b);
 				const auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
 				const auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
+
+				error = delta.squaredNorm();
+				if (error > 100.) {
+					LOG_S(WARNING) << "Divergence detected. Stopping.";
+					break;
+				}
 
 				for (int f = 0;f < labeledPointClouds.size();f++)
 				{
@@ -2292,7 +2313,6 @@ public:
 							trafo(2, 3) = m(2);
 						}
 						
-						//pcl::transformPointCloud(*labeledPointCloudsTransformed[f], labeledPoints[f][label].indices, *labeledPointCloudsTransformed[f], trafo);// <- SHIT CRASHES
 						for (const auto &idx : labeledPoints[f][label].indices)
 						{
 							auto &pt = (*labeledPointCloudsTransformed[f])[idx];
@@ -2305,9 +2325,8 @@ public:
 					}
 				}
 
-				error = delta.squaredNorm();
 				iteration++;
-				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i", iteration, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime);
+				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i | %10f", iteration, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime);
 
 				// build graph (http://www.andres.sc/publications/opengm-2.0.2-beta-manual.pdf)
 				for (int f = 0; f < labeledPointClouds.size(); f++)
@@ -2418,7 +2437,7 @@ public:
 					while (!viewer->wasStopped())
 					{
 						viewer->spinOnce(100);
-						boost::this_thread::sleep(boost::posix_time::microseconds(100000));st
+						boost::this_thread::sleep(boost::posix_time::microseconds(100000));
 					}
 					*/
 				}
@@ -2617,7 +2636,7 @@ int _main_(int _argc, char** _argv)
 		bool runningCapture = false;
 		bool captureChunk = false;
 		int numCapturedFrames = 0;
-		ReconstructionState reconstruction(7, 8);
+		ReconstructionState reconstruction(7, 16);
 
 		//assumption: tracking space is 10x10x8 (x,y,z) meters
 		constexpr unsigned int kinectSkeletonSpaceX = 10;
@@ -2968,6 +2987,11 @@ int _main_(int _argc, char** _argv)
 						if (ImGui::Button("Register point clouds"))
 						{
 							reconstruction.reconstructAvatar();
+						}
+						ImGui::SameLine();
+						if (ImGui::Button("Create Benchmark"))
+						{
+							reconstruction.createBenchmarkProblem();
 						}
 					ImGui::EndGroup();
 				ImGui::End();
