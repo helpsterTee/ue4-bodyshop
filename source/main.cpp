@@ -152,6 +152,19 @@ public:
 			}
 			indexBuffer = bgfx::alloc(indexBufferWidth*indexBufferHeight*sizeof(BYTE));
 		}
+
+		// Expose intrinsics
+
+		CameraIntrinsics depthIntrinsics;
+		coordinateMapper->GetDepthCameraIntrinsics(&depthIntrinsics);
+		LOG_S(INFO) << "Depth Camera Intrinsics. fx=" << depthIntrinsics.FocalLengthX
+			<< " fy=" << depthIntrinsics.FocalLengthX
+			<< " ppX=" << depthIntrinsics.PrincipalPointX
+			<< " ppY=" << depthIntrinsics.PrincipalPointY
+			<< " rd2=" << depthIntrinsics.RadialDistortionSecondOrder
+			<< " rd4=" << depthIntrinsics.RadialDistortionFourthOrder
+			<< " rd6=" << depthIntrinsics.RadialDistortionSixthOrder;
+		//fx=365.155 fy=365.155 ppX=257.226 ppY=206.719
 	}
 
 	bool RefreshData()
@@ -408,7 +421,7 @@ std::string to_string_extended(int number, int width=5)
 
 double angleForChunk(const int const current, const int total)
 {
-	return (current >= total/2 ? 0. : 180.) + (rand()%1);
+	//return (current >= total/2 ? 0. : 180.) + (rand()%1);
 	//return static_cast<int>(2 * current * 100. / total) % 100 - 50.;
 	//constexpr std::array<float, 4> angles = { -90., -45., 0., 45.};
 	constexpr std::array<float, 8> angles = { -90., -67.5, -45., -22.5, 0., 22.5, 45., 67.5};
@@ -998,6 +1011,21 @@ public:
 		}
 
 		// preprocess data
+		auto kinect2_undistort = [](float dx, float dy, float& mx, float& my)
+		{
+			constexpr double depth_k1 = 0.0922212;
+			constexpr double depth_k2 = -0.2708;
+			constexpr double depth_k3 = 0.0919156;
+			float ps = (dx * dx) + (dy * dy);
+			float qs = ((ps * depth_k3 + depth_k2) * ps + depth_k1) * ps + 1.0;
+			for (int i = 0; i < 9; i++) {
+				float qd = ps / (qs * qs);
+				qs = ((qd * depth_k3 + depth_k2) * qd + depth_k1) * qd + 1.0;
+			}
+			mx = dx / qs;
+			my = dy / qs;
+		};
+
 		std::vector<cv::Mat> superresDepthImages(mNumChunks);
 		#pragma omp parallel for
 		for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
@@ -1218,9 +1246,8 @@ public:
 			// superresolution
 			{
 				LOG_SCOPE_F(INFO, "Starting superresolution %i/%i.", curChunkIdx + 1, superresDepthImages.size());
-				superresDepthImages[curChunkIdx] = rgbdDepthSuperresolution(cvColorImages, cvDepthImages);
+				//superresDepthImages[curChunkIdx] = rgbdDepthSuperresolution(cvColorImages, cvDepthImages);
 				// take median
-				/*
 				const auto rows = cvColorImages[0].rows;
 				const auto cols = cvColorImages[0].cols;
 				superresDepthImages[curChunkIdx] = cv::Mat(rows, cols, CV_16U);
@@ -1240,7 +1267,7 @@ public:
 						superresDepthImages[curChunkIdx].at<uint16_t>(y, x) = depthValues.size() ? depthValues[depthValues.size()/2] : 0;
 					}
 				}
-				*/
+
 				{
 					std::string filename = "data/superres_depth";
 					filename += to_string_extended(curChunkIdx + 1);
@@ -1329,8 +1356,8 @@ public:
 						{
 							auto color = aligneeColorImage.read(x + bboxHighRes[curChunkIdx].first.x, y + bboxHighRes[curChunkIdx].first.y);
 							pcl::PointXYZRGB p;
-							p.x = x;
-							p.y = y;
+							p.x = x + bboxHighRes[curChunkIdx].first.x;
+							p.y = y + bboxHighRes[curChunkIdx].first.y;
 							p.z = curSuperresDepthImage.at<uint16_t>(y, x);
 							p.r = color.rgbBlue;
 							p.g = color.rgbGreen;
@@ -1345,9 +1372,12 @@ public:
 				for (size_t i = 0; i < mPointClouds[curChunkIdx]->points.size(); ++i)
 				{
 					auto& p = (*mPointClouds[curChunkIdx])[i];
-					p.x = ((p.x + bboxHighRes[curChunkIdx].first.x) / 1920. - 1.) * 3.6;
-					p.y = (1. - (p.y + bboxHighRes[curChunkIdx].first.y) / 1080.) * 2.;
-					p.z = p.z / 800.;
+					//p.x = ((p.x + bboxHighRes[curChunkIdx].first.x) / 1920. - 1.) * 3.6;
+					//p.y = (1. - (p.y + bboxHighRes[curChunkIdx].first.y) / 1080.) * 2.;
+					//p.z = p.z / 800.;
+
+					p.z = p.z/1000.;
+					kinect2_undistort(p.z*(p.x / 4. + 0.5 - 257.226) / 365.155, p.z*(p.y / 4. + 0.5 - 206.719) / 365.155, p.x, p.y);
 				}
 
 				{
@@ -1651,10 +1681,17 @@ public:
 			Eigen::Vector4f centroid;
 			pcl::compute3DCentroid(*mPointClouds[f], centroid);
 			float backsideRotation = (f >= mPointClouds.size() / 2) ? 0 : 180; //workaround for kinect 2 tracking (cannot detect backside properly)
-			Eigen::AngleAxisf aa(-0.0175*(angleForChunk(f, mPointClouds.size()) + backsideRotation), Eigen::Vector3f(0., 1., 0.));
+
+			Eigen::Affine3f trafo3; trafo3 = Eigen::AngleAxisf(0.0175 * 10, Eigen::Vector3f::UnitX());
+			pcl::transformPointCloud(*mPointClouds[f], *mPointClouds[f], trafo3);
+
+			Eigen::AngleAxisf aa(-0.0175*(angleForChunk(f, mPointClouds.size()) + backsideRotation), Eigen::Vector3f::UnitY()); // degree to radians
 			Eigen::Vector3f trans = -1 * centroid.head<3>();
 			Eigen::Affine3f trafo = aa*Eigen::Translation3f(trans);
 			pcl::transformPointCloud(*mPointClouds[f], *mPointClouds[f], trafo);
+
+			Eigen::Affine3f trafo2; trafo2 = Eigen::Translation3f(aa*(-0.1*Eigen::Vector3f::UnitZ()));
+			pcl::transformPointCloud(*mPointClouds[f], *mPointClouds[f], trafo2);
 
 			for (int idx = 0; idx < mPointClouds[f]->size(); idx++)
 			{
@@ -1672,6 +1709,7 @@ public:
 		}
 
 		// Show initial solution
+		
 		{
 			boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
 			viewer->setBackgroundColor(0, 0, 0);
@@ -1691,7 +1729,7 @@ public:
 				boost::this_thread::sleep(boost::posix_time::microseconds(100000));
 			}
 		}
-
+		
 		// ----------- rigid registration -------------
 		std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
 		{
@@ -1703,7 +1741,7 @@ public:
 				totalNumPoints += mPointClouds[i]->size();
 			}
 
-			constexpr int maxIterations = 2;
+			constexpr int maxIterations = 3;
 			constexpr double errorBound = 0.0001;
 
 			//std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
@@ -1748,9 +1786,9 @@ public:
 				#pragma omp parallel for
 				for(int f = 0; f < labeledPointClouds.size(); f++)
 				{
-					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
-					for(const auto g : neighbouringFrames )
-					//for (int g = 0;g < labeledPointClouds.size(); g++)
+					//const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
+					//for(const auto g : neighbouringFrames )
+					for (int g = 0;g < labeledPointClouds.size(); g++)
 					{
 						if(g!=f)
 						{
@@ -1790,7 +1828,7 @@ public:
 									A.block<3, 3>(rowg, colf) += pOverVar*yfnhat;
 									// -y_f,n hat * y_f,n hat ??
 									A.block<3, 3>(rowg, colf+3) += -pOverVar*yfnhat*yfnhat;
-									// -y_f,n hat -> -y_g,m hat ??
+									// -y_f,n hat
 									A.block<3, 3>(rowg, colg) += -pOverVar*yfnhat;
 									// y_f,n hat * y_g,m hat ??
 									A.block<3, 3>(rowg, colg+3) += pOverVar*yfnhat*ygmhat;
@@ -2076,7 +2114,7 @@ public:
 		}
 
 		{
-			constexpr int maxIterations = 2;
+			constexpr int maxIterations = 3;
 			constexpr double alpha = 10.0;
 			constexpr double errorBound = 0.01;
 
@@ -2156,9 +2194,9 @@ public:
 				for (int f = 0; f < labeledPointClouds.size(); f++)
 				{
 					//const std::array<int, 2> neighbouringFrames = { (f + 1) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size() };
-					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
-					for (const auto g : neighbouringFrames)
-					//for (int g = 0; g < labeledPointClouds.size(); g++)
+					//const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
+					//for (const auto g : neighbouringFrames)
+					for (int g = 0; g < labeledPointClouds.size(); g++)
 					{
 						if(f!=g)
 						{
@@ -2444,6 +2482,7 @@ public:
 			} while (iteration < maxIterations && error > errorBound);
 
 			// show result
+			/*
 			for (int f = 0; f < labeledPointCloudsTransformed.size();f++) {
 				boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
 				viewer->setBackgroundColor(0, 0, 0);
@@ -2474,6 +2513,7 @@ public:
 					boost::this_thread::sleep(boost::posix_time::microseconds(100000));
 				}
 			}
+			*/
 
 			for (int f = 0; f < labeledPointClouds.size();f++) 
 			{
@@ -2842,7 +2882,7 @@ int _main_(int _argc, char** _argv)
 					}
 					DepthRampImage.update();
 
-
+					/*
 					if (runningCapture)
 					{
 						if (reconstruction.targetAngle() - 2. < bodyAngle && bodyAngle < reconstruction.targetAngle() + 2.)
@@ -2862,6 +2902,7 @@ int _main_(int _argc, char** _argv)
 							}
 						}
 					}
+					*/
 
 					if (captureChunk)
 					{
@@ -2941,7 +2982,7 @@ int _main_(int _argc, char** _argv)
 					ImGui::EndGroup();
 					ImGui::ProgressBar(0.);
 					ImGui::BeginGroup();
-						if (ImGui::Button("Start capture"))
+						/*if (ImGui::Button("Start capture"))
 						{
 							runningCapture = true;
 						}
@@ -2950,7 +2991,7 @@ int _main_(int _argc, char** _argv)
 						{
 							runningCapture = false;
 							reconstruction.reset();
-						}
+						}*/
 						if (ImGui::Button("Capture chunk"))
 						{
 							captureChunk = true;
