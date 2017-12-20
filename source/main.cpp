@@ -372,6 +372,7 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <Eigen/SparseQR>
 #include <Eigen/Eigenvalues>
 
 #include <iostream>
@@ -421,7 +422,7 @@ std::string to_string_extended(int number, int width=5)
 
 double angleForChunk(const int const current, const int total)
 {
-	//return (current >= total/2 ? 0. : 180.) + (rand()%1);
+	return (current >= total/2 ? 0. : 180.) + (rand()%1);
 	//return static_cast<int>(2 * current * 100. / total) % 100 - 50.;
 	//constexpr std::array<float, 4> angles = { -90., -45., 0., 45.};
 	constexpr std::array<float, 8> angles = { -90., -67.5, -45., -22.5, 0., 22.5, 45., 67.5};
@@ -913,15 +914,16 @@ public:
 		auto CM = KDP->CoordinateMapper();
 
 		// compute body hull
-		std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
+		typedef std::pair<cv::Point, cv::Point> PointPair;
 		std::unique_ptr<cv::Mat[]> bodyHull(new cv::Mat[mNumChunks], std::default_delete<cv::Mat[]>()); // giving the correspondences
-		std::unique_ptr<std::pair<cv::Point, cv::Point>[]> bboxHighRes = std::unique_ptr<std::pair<cv::Point, cv::Point>[]>(new std::pair<cv::Point, cv::Point>[mNumChunks], std::default_delete<std::pair<cv::Point, cv::Point>[]>());
-		std::unique_ptr<std::pair<cv::Point, cv::Point>[]> bboxLowRes = std::unique_ptr<std::pair<cv::Point, cv::Point>[]>(new std::pair<cv::Point, cv::Point>[mNumChunks], std::default_delete<std::pair<cv::Point, cv::Point>[]>());
+		std::unique_ptr<PointPair[]> bboxHighRes = std::unique_ptr<PointPair[]>(new PointPair[mNumChunks], std::default_delete<PointPair[]>());
+		std::unique_ptr<PointPair[]> bboxLowRes = std::unique_ptr<PointPair[]>(new PointPair[mNumChunks], std::default_delete<PointPair[]>());
 
 		#pragma omp parallel for
 		for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
 		{
 			// init
+			std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
 			bodyHull[curChunkIdx] = cv::Mat::zeros(KDP->ColorDataHeight(), KDP->ColorDataWidth(), CV_8U);
 			cv::Mat bodyHullLow = cv::Mat::zeros(KDP->DepthDataHeight(), KDP->DepthDataWidth(), CV_8U);
 			bboxLowRes[curChunkIdx].first = cv::Point(KDP->DepthDataHeight() - 1, KDP->DepthDataWidth() - 1);
@@ -1035,8 +1037,6 @@ public:
 			const auto bbLengthXLow = bboxLowRes[curChunkIdx].second.x - bboxLowRes[curChunkIdx].first.x + 1;
 			const auto bbLengthYLow = bboxLowRes[curChunkIdx].second.y - bboxLowRes[curChunkIdx].first.y + 1;
 
-			//CM->MapColorFrameToDepthSpace(KDP->DepthDataWidth()*KDP->DepthDataHeight(), mDepthImages[curChunkIdx].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
-
 			// crop away unneeded data
 			std::vector<cv::Mat> cvColorImages(mChunkSize);
 			std::vector<cv::Mat> cvDepthImages(mChunkSize);
@@ -1072,6 +1072,7 @@ public:
 					}
 				}
 
+				std::unique_ptr<DepthSpacePoint[]> depthPoints(new DepthSpacePoint[KDP->ColorDataWidth()*KDP->ColorDataHeight()], std::default_delete<DepthSpacePoint[]>());
 				CM->MapColorFrameToDepthSpace(KDP->DepthDataWidth()*KDP->DepthDataHeight(), mDepthImages[seriesImageIdx].raw(), KDP->ColorDataWidth()*KDP->ColorDataHeight(), depthPoints.get());
 				cvDepthImages[i] = cv::Mat(bbLengthYHigh, bbLengthXHigh, CV_16U);
 				cv::Mat cvDepthImage = cv::Mat(bbLengthYLow, bbLengthXLow, CV_16U);
@@ -1368,16 +1369,29 @@ public:
 				}
 
 				// transform to camera space
-				///@TODO transform the data manually
-				for (size_t i = 0; i < mPointClouds[curChunkIdx]->points.size(); ++i)
+				//for (size_t i = 0; i < mPointClouds[curChunkIdx]->points.size(); ++i)
+				for(auto& p : (*mPointClouds[curChunkIdx]))
 				{
-					auto& p = (*mPointClouds[curChunkIdx])[i];
-					//p.x = ((p.x + bboxHighRes[curChunkIdx].first.x) / 1920. - 1.) * 3.6;
-					//p.y = (1. - (p.y + bboxHighRes[curChunkIdx].first.y) / 1080.) * 2.;
-					//p.z = p.z / 800.;
+					//p.z /= 1000.;
+					//kinect2_undistort(p.z*(p.x / 3.75 - 257.226) / 365.155, p.z*(p.y / 2.54716981132 - 206.719) / 365.155, p.x, p.y);
 
-					p.z = p.z/1000.;
-					kinect2_undistort(p.z*(p.x / 4. + 0.5 - 257.226) / 365.155, p.z*(p.y / 4. + 0.5 - 206.719) / 365.155, p.x, p.y);
+					DepthSpacePoint dsp;
+					dsp.X = p.x / 3.75;
+					dsp.Y = p.y / 2.54716981132;
+					CameraSpacePoint csp;
+					CM->MapDepthPointToCameraSpace(dsp, (int)p.z, &csp);
+					if (!isinf(csp.Z))
+					{
+						p.x = csp.X;
+						p.y = csp.Y;
+						p.z = csp.Z;
+					}
+					else
+					{
+						p.x = 0;
+						p.y = 0;
+						p.z = 0;
+					}
 				}
 
 				{
@@ -1656,7 +1670,7 @@ public:
 		auto t = Eigen::Vector3d(0, 0, 0.1);
 		for (int f = 1;f < mPointClouds.size();f++)
 		{
-			Eigen::Affine3d trafo = Eigen::AngleAxisd((rand() % 6283) / 100. , rotaxis)*Eigen::Translation3d(t);
+			Eigen::Affine3d trafo = Eigen::AngleAxisd((rand() % 6283/75) / 100. , rotaxis)*Eigen::Translation3d(t);
 			pcl::transformPointCloud(*mPointClouds[0], *mPointClouds[f], trafo);
 		}
 	}
@@ -1681,11 +1695,12 @@ public:
 			Eigen::Vector4f centroid;
 			pcl::compute3DCentroid(*mPointClouds[f], centroid);
 			float backsideRotation = (f >= mPointClouds.size() / 2) ? 0 : 180; //workaround for kinect 2 tracking (cannot detect backside properly)
+			
+			// 0.0175 = degree to radians
+			//Eigen::Affine3f trafo3; trafo3 = Eigen::AngleAxisf(0.0175 * 13., Eigen::Vector3f::UnitX());
+			//pcl::transformPointCloud(*mPointClouds[f], *mPointClouds[f], trafo3);
 
-			Eigen::Affine3f trafo3; trafo3 = Eigen::AngleAxisf(0.0175 * 10, Eigen::Vector3f::UnitX());
-			pcl::transformPointCloud(*mPointClouds[f], *mPointClouds[f], trafo3);
-
-			Eigen::AngleAxisf aa(-0.0175*(angleForChunk(f, mPointClouds.size()) + backsideRotation), Eigen::Vector3f::UnitY()); // degree to radians
+			Eigen::AngleAxisf aa(-0.0175*(angleForChunk(f, mPointClouds.size()) + backsideRotation), Eigen::Vector3f::UnitY());
 			Eigen::Vector3f trans = -1 * centroid.head<3>();
 			Eigen::Affine3f trafo = aa*Eigen::Translation3f(trans);
 			pcl::transformPointCloud(*mPointClouds[f], *mPointClouds[f], trafo);
@@ -1703,7 +1718,7 @@ public:
 				ptLabeled.r = pt.r;
 				ptLabeled.g = pt.g;
 				ptLabeled.b = pt.b;
-				ptLabeled.label = -1;
+				ptLabeled.label = f;
 			}
 			
 		}
@@ -1719,7 +1734,7 @@ public:
 			{
 				pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGBL> rgb(labeledPointClouds[curChunkIdx]);
 				viewer->addPointCloud<pcl::PointXYZRGBL>(labeledPointClouds[curChunkIdx], rgb, "sample cloud" + std::to_string(curChunkIdx));
-				//viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "sample cloud" + std::to_string(curChunkIdx));
+				viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "sample cloud" + std::to_string(curChunkIdx));
 			}
 			viewer->initCameraParameters();
 
@@ -1781,84 +1796,196 @@ public:
 				///@todo optimize via parallel reduction on gpu over each point (xyz)
 				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
 				// rotations and translations = 6 paramters per frame
-				Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * totalNumPoints, 6* labeledPointClouds.size());
-				Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * totalNumPoints);
+				// we add 16 values per point pair per frame
+				Eigen::SparseMatrix<double> A(Nnear * 6 * totalNumPoints, 6* labeledPointClouds.size());
+				std::vector<Eigen::Triplet<double>> triplets(48 * totalNumPoints*Nnear);
+				Eigen::VectorXd b = Eigen::VectorXd::Zero(Nnear*6 * totalNumPoints);
 				#pragma omp parallel for
 				for(int f = 0; f < labeledPointClouds.size(); f++)
 				{
-					//const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
-					//for(const auto g : neighbouringFrames )
-					for (int g = 0;g < labeledPointClouds.size(); g++)
+					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
+					for(const auto g : neighbouringFrames )
+					//for (int g = 0;g < labeledPointClouds.size(); g++)
 					{
 						if(g!=f)
 						{
+							//std::vector<Eigen::Triplet<double>> triplets(12 * 6 * totalNumPoints);
 							std::vector<int> pointIdxNKNSearch(Nnear);
 							std::vector<float> pointNKNSquaredDistance(Nnear);
-							
-							for(int n = 0; n < labeledPointClouds[f]->size(); n++)
+							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
 							{
 								const auto& yfn = (*labeledPointClouds[f])[n];
 								auto numFoundPoints = kdtrees[g].nearestKSearch(yfn, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
-								for(int i = 0; i < numFoundPoints; i++)
+								for (int i = 0; i < numFoundPoints; i++)
 								{
 									const auto& ygm = (*labeledPointClouds[g])[pointIdxNKNSearch[i]];
 
 									// No reason to precalculate "POld", as it get only calculated once with this implementation
-									double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f,g))/variances(f,g);
-									int rowf = 6*(cloudOffsets[f]+n);
-									int rowg = 6*(cloudOffsets[f]+n)+3;
-									int colf = 6*f;
-									int colg = 6*g;
+									double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f, g)) / variances(f, g);
+									int rowf = Nnear*6 * (cloudOffsets[f] + n) + 6*i;
+									int rowg = Nnear*6 * (cloudOffsets[f] + n) + 6*i + 3;
+									int colf = 6 * f;
+									int colg = 6 * g;
 
 									Eigen::Matrix3d yfnhat = hat(yfn);
 									Eigen::Matrix3d ygmhat = hat(ygm);
 
+									int tripletIndex = 48*(Nnear*(cloudOffsets[f] + n) + i);
+
 									// fill A
 									// I3
-									A.block<3, 3>(rowf, colf) += pOverVar*Eigen::Matrix3d::Identity();
+									//A.block<3, 3>(rowf, colf) = pOverVar*Eigen::Matrix3d::Identity();
+									triplets[tripletIndex] = { rowf + 0, colf + 0 , pOverVar };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colf + 1 , pOverVar };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colf + 2 , pOverVar };
+									tripletIndex++;
 									// -y_f,n hat
-									A.block<3, 3>(rowf, colf+3) += -pOverVar*yfnhat;
+									//A.block<3, 3>(rowf, colf + 3) = -pOverVar*yfnhat;
+									triplets[tripletIndex] = { rowf + 0, colf + 3 + 1 , -pOverVar*yfnhat(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 0, colf + 3 + 2 , -pOverVar*yfnhat(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colf + 3 + 0 , -pOverVar*yfnhat(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colf + 3 + 2 , -pOverVar*yfnhat(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colf + 3 + 0 , -pOverVar*yfnhat(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colf + 3 + 1 , -pOverVar*yfnhat(2,1) };
+									tripletIndex++;
 									// -I3 
-									A.block<3, 3>(rowf, colg) += -pOverVar*Eigen::Matrix3d::Identity();
+									//A.block<3, 3>(rowf, colg) = -pOverVar*Eigen::Matrix3d::Identity();
+									triplets[tripletIndex] = { rowf + 0, colg + 0 , -pOverVar };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colg + 1 , -pOverVar };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colg + 2 , -pOverVar };
+									tripletIndex++;
 									// y_g,m hat
-									A.block<3, 3>(rowf, colg+3) += pOverVar*ygmhat;
+									//A.block<3, 3>(rowf, colg + 3) = pOverVar*ygmhat;
+									triplets[tripletIndex] = { rowf + 0, colg + 3 + 1 , pOverVar*ygmhat(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 0, colg + 3 + 2 , pOverVar*ygmhat(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colg + 3 + 0 , pOverVar*ygmhat(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colg + 3 + 2 , pOverVar*ygmhat(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colg + 3 + 0 , pOverVar*ygmhat(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colg + 3 + 1 , pOverVar*ygmhat(2,1) };
+									tripletIndex++;
 									// next row
-									
+
 									// y_f,n hat
-									A.block<3, 3>(rowg, colf) += pOverVar*yfnhat;
-									// -y_f,n hat * y_f,n hat ??
-									A.block<3, 3>(rowg, colf+3) += -pOverVar*yfnhat*yfnhat;
+									//A.block<3, 3>(rowg, colf) = pOverVar*yfnhat;
+									triplets[tripletIndex] = { rowg + 0, colf + 0 + 1 , pOverVar*yfnhat(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colf + 0 + 2 , pOverVar*yfnhat(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colf + 0 + 0 , pOverVar*yfnhat(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colf + 0 + 2 , pOverVar*yfnhat(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colf + 0 + 0 , pOverVar*yfnhat(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colf + 0 + 1 , pOverVar*yfnhat(2,1) };
+									tripletIndex++;
+									// -y_f,n hat * y_f,n hat 
+									auto yfnhat2 = yfnhat*yfnhat;
+									//A.block<3, 3>(rowg, colf + 3) = -pOverVar*;
+									triplets[tripletIndex] = { rowg + 0, colf + 3 + 0 , -pOverVar*yfnhat2(0,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colf + 3 + 1 , -pOverVar*yfnhat2(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colf + 3 + 2 , -pOverVar*yfnhat2(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colf + 3 + 0 , -pOverVar*yfnhat2(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colf + 3 + 1 , -pOverVar*yfnhat2(1,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colf + 3 + 2 , -pOverVar*yfnhat2(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colf + 3 + 0 , -pOverVar*yfnhat2(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colf + 3 + 1 , -pOverVar*yfnhat2(2,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colf + 3 + 2 , -pOverVar*yfnhat2(2,2) };
+									tripletIndex++;
 									// -y_f,n hat
-									A.block<3, 3>(rowg, colg) += -pOverVar*yfnhat;
-									// y_f,n hat * y_g,m hat ??
-									A.block<3, 3>(rowg, colg+3) += pOverVar*yfnhat*ygmhat;
+									//A.block<3, 3>(rowg, colg) = -pOverVar*yfnhat;
+									triplets[tripletIndex] = { rowg + 0, colg + 0 + 1 , -pOverVar*yfnhat(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colg + 0 + 2 , -pOverVar*yfnhat(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colg + 0 + 0 , -pOverVar*yfnhat(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colg + 0 + 2 , -pOverVar*yfnhat(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colg + 0 + 0 , -pOverVar*yfnhat(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colg + 0 + 1 , -pOverVar*yfnhat(2,1) };
+									tripletIndex++;
+									// y_f,n hat * y_g,m hat 
+									auto yfngmhat = yfnhat*ygmhat;
+									//A.block<3, 3>(rowg, colg + 3) = pOverVar*yfnhat*ygmhat;
+									triplets[tripletIndex] = { rowg + 0, colg + 3 + 0 , pOverVar*yfngmhat(0,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colg + 3 + 1 , pOverVar*yfngmhat(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colg + 3 + 2 , pOverVar*yfngmhat(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colg + 3 + 0 , pOverVar*yfngmhat(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colg + 3 + 1 , pOverVar*yfngmhat(1,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colg + 3 + 2 , pOverVar*yfngmhat(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colg + 3 + 0 , pOverVar*yfngmhat(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colg + 3 + 1 , pOverVar*yfngmhat(2,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colg + 3 + 2 , pOverVar*yfngmhat(2,2) };
+									tripletIndex++;
 
 									// fill b
-									b(rowf + 0) += pOverVar*(ygm.x - yfn.x);
-									b(rowf + 1) += pOverVar*(ygm.y - yfn.y);
-									b(rowf + 2) += pOverVar*(ygm.z - yfn.z);
+									b(rowf + 0) = pOverVar*(ygm.x - yfn.x);
+									b(rowf + 1) = pOverVar*(ygm.y - yfn.y);
+									b(rowf + 2) = pOverVar*(ygm.z - yfn.z);
 
-									b(rowg + 0) += pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
-									b(rowg + 1) += pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
-									b(rowg + 2) += pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
+									b(rowg + 0) = pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
+									b(rowg + 1) = pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
+									b(rowg + 2) = pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
 								}
 							}
 						}
 					}
 				}
+				A.setFromTriplets(triplets.begin(), triplets.end());
 				auto endTimeEQBuild = std::chrono::high_resolution_clock::now();
 				auto EQBuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQBuild - startTimeEQBuild).count();
 				
 				// solve equation system Ax=b to find rotation and translation deltas
 				auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
-				Eigen::VectorXd delta = A.fullPivHouseholderQr().solve(b);
+				Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> solver(A);
+				if (solver.info() != Eigen::ComputationInfo::Success)
+				{
+					LOG_S(WARNING) << "Shit hits the fan." << solver.info();
+					break;
+				}
+				Eigen::VectorXd delta = solver.solve(b);
+				if (solver.info() != Eigen::ComputationInfo::Success)
+				{
+					LOG_S(WARNING) << "Shit hits the fan." << solver.info();
+					break;
+				}
+				//Eigen::VectorXd delta = A.fullPivHouseholderQr().solve(b);
 				auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
 				auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
 				error = delta.squaredNorm();
-				if (error > 100.) {
-					LOG_S(WARNING) << "Divergence detected. Stopping.";
-					break;
-				}
+				
 
 				for (int f = 0;f < labeledPointClouds.size();f++)
 				{
@@ -2114,8 +2241,8 @@ public:
 		}
 
 		{
-			constexpr int maxIterations = 3;
-			constexpr double alpha = 10.0;
+			constexpr int maxIterations = 5;
+			constexpr double alpha = 0.8;
 			constexpr double errorBound = 0.01;
 
 			std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL>> kdtrees(labeledPointClouds.size());
@@ -2187,16 +2314,328 @@ public:
 				
 				// precompute components of Q for all y and f
 				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
-				Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * (totalNumPoints + totalNumJoints), 6 * totalNumLabels );
-				Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * (totalNumPoints + totalNumJoints));
+				//Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * (totalNumPoints + totalNumJoints), 6 * totalNumLabels );
+				//Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * (totalNumPoints + totalNumJoints));
 
+				Eigen::SparseMatrix<double> A(6 * (Nnear*totalNumPoints + totalNumJoints), 6 * totalNumLabels);
+				std::vector<Eigen::Triplet<double>> triplets(48 * (totalNumPoints*Nnear + totalNumJoints));
+				Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * (Nnear*totalNumPoints + totalNumJoints));
 				#pragma omp parallel for
 				for (int f = 0; f < labeledPointClouds.size(); f++)
 				{
-					//const std::array<int, 2> neighbouringFrames = { (f + 1) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size() };
-					//const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
-					//for (const auto g : neighbouringFrames)
-					for (int g = 0; g < labeledPointClouds.size(); g++)
+					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
+					for (const auto g : neighbouringFrames)
+						//for (int g = 0;g < labeledPointClouds.size(); g++)
+					{
+						if (g != f)
+						{
+							//std::vector<Eigen::Triplet<double>> triplets(labeledPointClouds[f]->size()*Nnear*16);
+							std::vector<int> pointIdxNKNSearch(Nnear);
+							std::vector<float> pointNKNSquaredDistance(Nnear);
+							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
+							{
+								const auto& yfn = (*labeledPointClouds[f])[n];
+								auto numFoundPoints = kdtrees[g].nearestKSearch(yfn, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+								for (int i = 0; i < numFoundPoints; i++)
+								{
+									const auto& ygm = (*labeledPointClouds[g])[pointIdxNKNSearch[i]];
+
+									// No reason to precalculate "POld", as it get only calculated once with this implementation
+									double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f, g)) / variances(f, g);
+									int rowf = 20 * 6 * (cloudOffsets[f] + n) + 6 * i;
+									int rowg = 20 * 6 * (cloudOffsets[f] + n) + 6 * i + 3;
+									int colf = 6 * f;
+									int colg = 6 * g;
+
+									Eigen::Matrix3d yfnhat = hat(yfn);
+									Eigen::Matrix3d ygmhat = hat(ygm);
+									int tripletIndex = 48 * (Nnear*(cloudOffsets[f] + n) + i);
+
+									// fill A
+									// I3
+									//A.block<3, 3>(rowf, colf) = pOverVar*Eigen::Matrix3d::Identity();
+									triplets[tripletIndex] = { rowf + 0, colf + 0 , pOverVar };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colf + 1 , pOverVar };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colf + 2 , pOverVar };
+									tripletIndex++;
+									// -y_f,n hat
+									//A.block<3, 3>(rowf, colf + 3) = -pOverVar*yfnhat;
+									triplets[tripletIndex] = { rowf + 0, colf + 3 + 1 , -pOverVar*yfnhat(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 0, colf + 3 + 2 , -pOverVar*yfnhat(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colf + 3 + 0 , -pOverVar*yfnhat(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colf + 3 + 2 , -pOverVar*yfnhat(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colf + 3 + 0 , -pOverVar*yfnhat(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colf + 3 + 1 , -pOverVar*yfnhat(2,1) };
+									tripletIndex++;
+									// -I3 
+									//A.block<3, 3>(rowf, colg) = -pOverVar*Eigen::Matrix3d::Identity();
+									triplets[tripletIndex] = { rowf + 0, colg + 0 , -pOverVar };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colg + 1 , -pOverVar };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colg + 2 , -pOverVar };
+									tripletIndex++;
+									// y_g,m hat
+									//A.block<3, 3>(rowf, colg + 3) = pOverVar*ygmhat;
+									triplets[tripletIndex] = { rowf + 0, colg + 3 + 1 , pOverVar*ygmhat(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 0, colg + 3 + 2 , pOverVar*ygmhat(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colg + 3 + 0 , pOverVar*ygmhat(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 1, colg + 3 + 2 , pOverVar*ygmhat(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colg + 3 + 0 , pOverVar*ygmhat(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowf + 2, colg + 3 + 1 , pOverVar*ygmhat(2,1) };
+									tripletIndex++;
+									// next row
+
+									// y_f,n hat
+									//A.block<3, 3>(rowg, colf) = pOverVar*yfnhat;
+									triplets[tripletIndex] = { rowg + 0, colf + 0 + 1 , pOverVar*yfnhat(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colf + 0 + 2 , pOverVar*yfnhat(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colf + 0 + 0 , pOverVar*yfnhat(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colf + 0 + 2 , pOverVar*yfnhat(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colf + 0 + 0 , pOverVar*yfnhat(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colf + 0 + 1 , pOverVar*yfnhat(2,1) };
+									tripletIndex++;
+									// -y_f,n hat * y_f,n hat 
+									auto yfnhat2 = yfnhat*yfnhat;
+									//A.block<3, 3>(rowg, colf + 3) = -pOverVar*;
+									triplets[tripletIndex] = { rowg + 0, colf + 3 + 0 , -pOverVar*yfnhat2(0,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colf + 3 + 1 , -pOverVar*yfnhat2(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colf + 3 + 2 , -pOverVar*yfnhat2(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colf + 3 + 0 , -pOverVar*yfnhat2(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colf + 3 + 1 , -pOverVar*yfnhat2(1,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colf + 3 + 2 , -pOverVar*yfnhat2(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colf + 3 + 0 , -pOverVar*yfnhat2(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colf + 3 + 1 , -pOverVar*yfnhat2(2,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colf + 3 + 2 , -pOverVar*yfnhat2(2,2) };
+									tripletIndex++;
+									// -y_f,n hat
+									//A.block<3, 3>(rowg, colg) = -pOverVar*yfnhat;
+									triplets[tripletIndex] = { rowg + 0, colg + 0 + 1 , -pOverVar*yfnhat(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colg + 0 + 2 , -pOverVar*yfnhat(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colg + 0 + 0 , -pOverVar*yfnhat(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colg + 0 + 2 , -pOverVar*yfnhat(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colg + 0 + 0 , -pOverVar*yfnhat(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colg + 0 + 1 , -pOverVar*yfnhat(2,1) };
+									tripletIndex++;
+									// y_f,n hat * y_g,m hat 
+									auto yfngmhat = yfnhat*ygmhat;
+									//A.block<3, 3>(rowg, colg + 3) = pOverVar*yfnhat*ygmhat;
+									triplets[tripletIndex] = { rowg + 0, colg + 3 + 0 , pOverVar*yfngmhat(0,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colg + 3 + 1 , pOverVar*yfngmhat(0,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 0, colg + 3 + 2 , pOverVar*yfngmhat(0,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colg + 3 + 0 , pOverVar*yfngmhat(1,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colg + 3 + 1 , pOverVar*yfngmhat(1,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 1, colg + 3 + 2 , pOverVar*yfngmhat(1,2) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colg + 3 + 0 , pOverVar*yfngmhat(2,0) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colg + 3 + 1 , pOverVar*yfngmhat(2,1) };
+									tripletIndex++;
+									triplets[tripletIndex] = { rowg + 2, colg + 3 + 2 , pOverVar*yfngmhat(2,2) };
+									tripletIndex++;
+
+									// fill b
+									b(rowf + 0) = pOverVar*(ygm.x - yfn.x);
+									b(rowf + 1) = pOverVar*(ygm.y - yfn.y);
+									b(rowf + 2) = pOverVar*(ygm.z - yfn.z);
+
+									b(rowg + 0) = pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
+									b(rowg + 1) = pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
+									b(rowg + 2) = pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
+								}
+							}
+						}
+					}
+
+					int jointIndex = 0;
+					for (auto const &ent1 : jointEstimations[f])
+					{
+						for (auto const &ent2 : ent1.second)
+						{
+							const int row = 6 * (20*totalNumPoints + (jointOffsets[f] + jointIndex));
+							const int cola = 6 * (labelOffsets[f] + ent1.first);
+							const int colb = 6 * (labelOffsets[f] + ent2.first);
+
+							const auto& jointCentroid = ent2.second;
+							pcl::PointXYZ yfab;
+							jointCentroid.get(yfab);
+							auto yfabhat = hat(yfab);
+
+							int tripletIndex = 48 * (Nnear*totalNumPoints + (jointOffsets[f] + jointIndex));
+
+							// fill A
+							// I3
+							//A.block<3, 3>(rowf, colf) = pOverVar*Eigen::Matrix3d::Identity();
+							triplets[tripletIndex] = { row + 0, cola + 0 , 2*alpha };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 1, cola + 1 , 2*alpha };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 2, cola + 2 , 2*alpha };
+							tripletIndex++;
+							// -y_f,n hat
+							//A.block<3, 3>(rowf, cola + 3) = -2*alpha*yfnhat;
+							triplets[tripletIndex] = { row + 0, cola + 3 + 1 , -2*alpha*yfabhat(0,1) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 0, cola + 3 + 2 , -2*alpha*yfabhat(0,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 1, cola + 3 + 0 , -2*alpha*yfabhat(1,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 1, cola + 3 + 2 , -2*alpha*yfabhat(1,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 2, cola + 3 + 0 , -2*alpha*yfabhat(2,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 2, cola + 3 + 1 , -2*alpha*yfabhat(2,1) };
+							tripletIndex++;
+							// -I3 
+							//A.block<3, 3>(rowf, colb) = -2*alpha*Eigen::Matrix3d::Identity();
+							triplets[tripletIndex] = { row + 0, colb + 0 , -2*alpha };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 1, colb + 1 , -2*alpha };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 2, colb + 2 , -2*alpha };
+							tripletIndex++;
+							// y_g,m hat
+							//A.block<3, 3>(rowf, colb + 3) = 2*alpha*ygmhat;
+							triplets[tripletIndex] = { row + 0, colb + 3 + 1 , 2*alpha*yfabhat(0,1) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 0, colb + 3 + 2 , 2*alpha*yfabhat(0,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 1, colb + 3 + 0 , 2*alpha*yfabhat(1,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 1, colb + 3 + 2 , 2*alpha*yfabhat(1,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 2, colb + 3 + 0 , 2*alpha*yfabhat(2,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 2, colb + 3 + 1 , 2*alpha*yfabhat(2,1) };
+							tripletIndex++;
+							// next row
+
+							// y_f,n hat
+							//A.block<3, 3>(rowg, cola) = 2*alpha*yfnhat;
+							triplets[tripletIndex] = { row + 3 + 0, cola + 0 + 1 , 2*alpha*yfabhat(0,1) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 0, cola + 0 + 2 , 2*alpha*yfabhat(0,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 1, cola + 0 + 0 , 2*alpha*yfabhat(1,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 1, cola + 0 + 2 , 2*alpha*yfabhat(1,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 2, cola + 0 + 0 , 2*alpha*yfabhat(2,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 2, cola + 0 + 1 , 2*alpha*yfabhat(2,1) };
+							tripletIndex++;
+							// -y_f,n hat * y_f,n hat 
+							auto yfabhat2 = yfabhat*yfabhat;
+							//A.block<3, 3>(rowg, cola + 3) = -2*alpha*;
+							triplets[tripletIndex] = { row + 3 + 0, cola + 3 + 0 , -2*alpha*yfabhat2(0,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 0, cola + 3 + 1 , -2*alpha*yfabhat2(0,1) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 0, cola + 3 + 2 , -2*alpha*yfabhat2(0,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 1, cola + 3 + 0 , -2*alpha*yfabhat2(1,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 1, cola + 3 + 1 , -2*alpha*yfabhat2(1,1) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 1, cola + 3 + 2 , -2*alpha*yfabhat2(1,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 2, cola + 3 + 0 , -2*alpha*yfabhat2(2,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 2, cola + 3 + 1 , -2*alpha*yfabhat2(2,1) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 2, cola + 3 + 2 , -2*alpha*yfabhat2(2,2) };
+							tripletIndex++;
+							// -y_f,n hat
+							//A.block<3, 3>(row + 3, colb) = -2*alpha*yfnhat;
+							triplets[tripletIndex] = { row + 3 + 0, colb + 0 + 1 , -2*alpha*yfabhat(0,1) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 0, colb + 0 + 2 , -2*alpha*yfabhat(0,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 1, colb + 0 + 0 , -2*alpha*yfabhat(1,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 1, colb + 0 + 2 , -2*alpha*yfabhat(1,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 2, colb + 0 + 0 , -2*alpha*yfabhat(2,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 2, colb + 0 + 1 , -2*alpha*yfabhat(2,1) };
+							tripletIndex++;
+							// y_f,n hat * y_g,m hat 
+							//A.block<3, 3>(row + 3, colb + 3) = 2*alpha*yfnhat*ygmhat;
+							triplets[tripletIndex] = { row + 3 + 0, colb + 3 + 0 , 2*alpha*yfabhat2(0,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 0, colb + 3 + 1 , 2*alpha*yfabhat2(0,1) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 0, colb + 3 + 2 , 2*alpha*yfabhat2(0,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 1, colb + 3 + 0 , 2*alpha*yfabhat2(1,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 1, colb + 3 + 1 , 2*alpha*yfabhat2(1,1) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 1, colb + 3 + 2 , 2*alpha*yfabhat2(1,2) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 2, colb + 3 + 0 , 2*alpha*yfabhat2(2,0) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 2, colb + 3 + 1 , 2*alpha*yfabhat2(2,1) };
+							tripletIndex++;
+							triplets[tripletIndex] = { row + 3 + 2, colb + 3 + 2 , 2*alpha*yfabhat2(2,2) };
+							tripletIndex++;
+
+							// fill b
+							b(row + 0) += 0;
+							b(row + 1) += 0;
+							b(row + 2) += 0;
+
+							b(row + 3 + 0) += 0;
+							b(row + 3 + 1) += 0;
+							b(row + 3 + 2) += 0;
+
+							jointIndex++;
+						}
+					}
+				}
+				A.setFromTriplets(triplets.begin(), triplets.end());
+				/*
+				#pragma omp parallel for
+				for (int f = 0; f < labeledPointClouds.size(); f++)
+				{
+					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
+					for (const auto g : neighbouringFrames)
+					//for (int g = 0; g < labeledPointClouds.size(); g++)
 					{
 						if(f!=g)
 						{
@@ -2300,20 +2739,34 @@ public:
 						}
 					}
 				}
+				*/
 				const auto endTimeEQBuild = std::chrono::high_resolution_clock::now();
 				auto EQBuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQBuild - startTimeEQBuild).count();
 
 				// solve equation system Ax=b to find rotation and translation deltas
 				const auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
-				const Eigen::VectorXd delta = A.fullPivHouseholderQr().solve(b);
+				//const Eigen::VectorXd delta = A.fullPivHouseholderQr().solve(b);
+				Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> solver(A);
+				if (solver.info() != Eigen::ComputationInfo::Success)
+				{
+					LOG_S(WARNING) << "Shit hits the fan." << solver.info();
+					break;
+				}
+				Eigen::VectorXd delta = solver.solve(b);
+				if (solver.info() != Eigen::ComputationInfo::Success)
+				{
+					LOG_S(WARNING) << "Shit hits the fan." << solver.info();
+					break;
+				}
 				const auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
 				const auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
 
 				error = delta.squaredNorm();
-				if (error > 100.) {
-					LOG_S(WARNING) << "Divergence detected. Stopping.";
-					break;
-				}
+				//if (!(A*delta).isApprox(b))
+				//{
+				//	LOG_S(WARNING) << "Shit hits the fan." << delta;
+				//	break;
+				//}
 
 				for (int f = 0;f < labeledPointClouds.size();f++)
 				{
