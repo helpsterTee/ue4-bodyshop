@@ -15,7 +15,7 @@ set(SOURCES
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 # ---- ugly hack ---- #
-add_definitions(-D_ITERATOR_DEBUG_LEVEL=0)
+#add_definitions(-D_ITERATOR_DEBUG_LEVEL=0)
 
 
 # ------------ bgfx related stuff ------------- #
@@ -88,12 +88,33 @@ endif()
 find_package( OpenCV REQUIRED )
 
 
-# ------------- eigen .... ---------------------- #
+# ------------- eigen + SuiteSparse ---------------------- #
+set(EIGEN_BLAS_LIBRARIES eigen_static_blas)
+set(EIGEN_LAPACK_LIBRARIES eigen_static_lapack)
+
 find_package( Eigen3 REQUIRED )
 include_directories(${EIGEN3_INCLUDE_DIR})
 
+include_directories(E:/dennio/repositories/suitesparse-metis-for-windows/SuiteSparse/SuiteSparse_config)
+
+find_package(Cholmod REQUIRED)
+if(CHOLMOD_FOUND)
+  add_definitions("-DEIGEN_CHOLMOD_SUPPORT")
+  include_directories(${CHOLMOD_INCLUDES})
+  set(SPARSE_LIBS ${SPARSE_LIBS} ${CHOLMOD_LIBRARIES} ${EIGEN_BLAS_LIBRARIES} ${EIGEN_LAPACK_LIBRARIES})
+  set(CHOLMOD_ALL_LIBS  ${CHOLMOD_LIBRARIES} ${EIGEN_BLAS_LIBRARIES} ${EIGEN_LAPACK_LIBRARIES})
+endif()
+
+find_package(SPQR REQUIRED)
+if(SPQR_FOUND)
+	add_definitions("-DEIGEN_SPQR_SUPPORT")
+	include_directories(${SPQR_INCLUDES})
+	set(SPQR_ALL_LIBS ${SPQR_LIBRARIES} ${CHOLMOD_LIBRARIES} ${EIGEN_LAPACK_LIBRARIES} ${EIGEN_BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
+	set(SPARSE_LIBS ${SPARSE_LIBS} ${SPQR_ALL_LIBS})
+endif()
+
 # ------------------- PCL ---------------------- #
-find_package(PCL 1.7 REQUIRED COMPONENTS common console features io registration surface visualization segmentation)
+find_package(PCL 1.7 REQUIRED COMPONENTS common features io registration surface visualization segmentation)
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
@@ -109,5 +130,5 @@ target_include_directories(${PROJECT_NAME}
 )
 
 target_link_libraries(${PROJECT_NAME}
-    PUBLIC ${BX_LIB} ${BGFX_LIB} ${BGFX_COMMON_LIB} ${KINECT2_LIB} ib-compress ocornut-imgui ${OpenCV_LIBS} ${PCL_LIBRARIES}
+    PUBLIC ${BX_LIB} ${BGFX_LIB} ${BGFX_COMMON_LIB} ${KINECT2_LIB} ib-compress ocornut-imgui ${OpenCV_LIBS} ${PCL_LIBRARIES} ${SPARSE_LIBS}
 )

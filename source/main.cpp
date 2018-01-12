@@ -8,12 +8,24 @@
 #include <stdexcept>
 #include <cmath>
 
+#include <omp.h> 
 // @todo replace....
 #define LOGURU_IMPLEMENTATION 1
 #define LOGURU_WITH_STREAMS 1
 #include "loguru.hpp"
 
+void setupLogThreadName() 
+{
+	auto num = omp_get_thread_num();
+	if (num != 0)
+	{
+		loguru::set_thread_name(("OMP Thread " + std::to_string(num)).c_str());
+	}
+}
+
 #include "util.hpp"
+
+
 
 //! Synchronous data provider
 class KinectDataProvider
@@ -368,11 +380,10 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <numeric>
 #include <algorithm>
 
-#include <omp.h> 
-
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/SparseQR>
+#include <Eigen/SPQRSupport>
 #include <Eigen/Eigenvalues>
 
 #include <iostream>
@@ -409,7 +420,12 @@ void DrawVector(RenderImage& target, unsigned int x, unsigned int y, float vx, f
 #include <opengm/graphicalmodel/space/simplediscretespace.hxx>
 #include <opengm/functions/potts.hxx>
 */
-constexpr int Nnear = 20;
+
+///@todo REFACTOR
+int Nnear = 20;
+float alphaEq = 0.8;
+int maxIterRigid = 5;
+int maxIterNonRigid = 5;
 
 std::string to_string_extended(int number, int width=5)
 {
@@ -422,7 +438,8 @@ std::string to_string_extended(int number, int width=5)
 
 double angleForChunk(const int const current, const int total)
 {
-	return (current >= total/2 ? 0. : 180.) + (rand()%1);
+	//return (current >= total/2 ? 0. : 180.) + (rand()%1);
+
 	//return static_cast<int>(2 * current * 100. / total) % 100 - 50.;
 	//constexpr std::array<float, 4> angles = { -90., -45., 0., 45.};
 	constexpr std::array<float, 8> angles = { -90., -67.5, -45., -22.5, 0., 22.5, 45., 67.5};
@@ -439,6 +456,17 @@ Eigen::Matrix3d hat(const T& v)
 		0, -v.z, v.y,
 		v.z, 0, -v.x,
 		-v.y, v.x, 0;
+	return vhat;
+}
+
+template<>
+Eigen::Matrix3d hat(const Eigen::Vector3d& v)
+{
+	Eigen::Matrix3d vhat;
+	vhat <<
+		0, -v(2), v(1),
+		v(2), 0, -v(0),
+		-v(1), v(0), 0;
 	return vhat;
 }
 
@@ -1013,6 +1041,7 @@ public:
 		}
 
 		// preprocess data
+		///@NOTE this code is copied from the libfreenect2 project 
 		auto kinect2_undistort = [](float dx, float dy, float& mx, float& my)
 		{
 			constexpr double depth_k1 = 0.0922212;
@@ -1382,8 +1411,9 @@ public:
 					CM->MapDepthPointToCameraSpace(dsp, (int)p.z, &csp);
 					if (!isinf(csp.Z))
 					{
-						p.x = csp.X;
-						p.y = csp.Y;
+						// experimentally evaluated scale factors as the process introduces distrotion, somehow
+						p.x = 1.2*csp.X;
+						p.y = 0.84*csp.Y;
 						p.z = csp.Z;
 					}
 					else
@@ -1572,10 +1602,10 @@ public:
 	}
 
 
-	void downsamplePointClouds()
+	void downsamplePointClouds(const double leafsize)
 	{
 		LOG_SCOPE_FUNCTION(INFO);
-		constexpr double leafsize = 0.03;
+		
 
 		#pragma omp parallel for
 		for (int curChunkIdx = 0; curChunkIdx < mNumChunks; curChunkIdx++)
@@ -1631,10 +1661,10 @@ public:
 		std::vector<int> pointIdxNKNSearch(Nnear);
 		std::vector<float> pointNKNSquaredDistance(Nnear);
 		double sum = 0.;
-		double minus2variance = -2 * variance;
+		double minus2variance = -2*variance;
 		//for (int n = 0;n < kdtree.getInputCloud()->size();n++)
 		{
-			auto numFoundPoints = kdtree.nearestKSearch(ygm, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+			auto numFoundPoints = kdtree.nearestKSearch(yfn, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
 			for (int m = 0; m < numFoundPoints; m++)
 			{
 				sum += exp(pointNKNSquaredDistance[m]/minus2variance);
@@ -1644,14 +1674,14 @@ public:
 		return exp(distSquared/minus2variance) / sum;
 	}
 
-	void createBenchmarkProblem(int size = 10)
+	void createBenchmarkProblem(const int size = 2, const double stepSize = 0.05)
 	{
 		mPointClouds.resize(size);
 		for(auto &cloud : mPointClouds)
 		{
 			cloud = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
 		}
-		constexpr double stepSize = 0.05;
+		
 		for (double x = 0; x <= 1; x+= stepSize)
 		{
 			for (double y = 0;y <= 1; y+= stepSize)
@@ -1670,7 +1700,7 @@ public:
 		auto t = Eigen::Vector3d(0, 0, 0.1);
 		for (int f = 1;f < mPointClouds.size();f++)
 		{
-			Eigen::Affine3d trafo = Eigen::AngleAxisd((rand() % 6283/75) / 100. , rotaxis)*Eigen::Translation3d(t);
+			Eigen::Affine3d trafo = Eigen::AngleAxisd((rand() % 6283/200) / 100. , rotaxis)*Eigen::Translation3d(t);
 			pcl::transformPointCloud(*mPointClouds[0], *mPointClouds[f], trafo);
 		}
 	}
@@ -1684,8 +1714,10 @@ public:
 		
 		// ------- initial registration --------
 		//  initial solution from capturing
+		#pragma omp parallel for
 		for (int f = 0; f < mPointClouds.size(); f++)
 		{
+			setupLogThreadName();
 			LOG_S(INFO) << "Initial registration " << f + 1 << "/" << mPointClouds.size() << " with " << mPointClouds[f]->size() << " points";
 			labeledPointClouds[f] = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBL>>();
 			labeledPointClouds[f]->resize(mPointClouds[f]->size());
@@ -1756,23 +1788,25 @@ public:
 				totalNumPoints += mPointClouds[i]->size();
 			}
 
-			constexpr int maxIterations = 3;
+			const int maxIterations = maxIterRigid;
 			constexpr double errorBound = 0.0001;
 
 			//std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
 
-			LOG_SCOPE_F(INFO, "Starting rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
-			LOG_F(INFO, "%-5s | %-15s | %-15s | %-15s | %-15s | %-15s", "iter", "error", "kdtree time", "var time", "eq build", "eq solve");
+			LOG_F(INFO, "Starting rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
+			LOG_F(INFO, "%-5s | %-10s | %-10s | %-10s | %-10s | %-10s | %-10s | %-10s", "iter", "gradient", "t kdtree", "t var", "t build", "t solve", "precision", "energy");
 
 			int iteration = 0;
-			double error = 1.;
+			double gradient = 1.;
 
 			do
 			{
 				// update closest points
 				auto startTimeKDTree = std::chrono::high_resolution_clock::now();
+				#pragma omp parallel for
 				for (int f = 0; f < kdtrees.size(); f++)
 				{
+					setupLogThreadName();
 					kdtrees[f].setInputCloud(labeledPointClouds[f]);
 				}
 				auto endTimeKDTree = std::chrono::high_resolution_clock::now();
@@ -1784,6 +1818,7 @@ public:
 				#pragma omp parallel for
 				for (int f = 0; f < labeledPointClouds.size(); f++)
 				{
+					setupLogThreadName();
 					for (int g = 0; g < labeledPointClouds.size(); g++)
 					{
 						variances(f, g) = calculateVariance<pcl::PointXYZRGBL>(labeledPointClouds[f], kdtrees[g]);
@@ -1795,25 +1830,52 @@ public:
 				// build equation system
 				///@todo optimize via parallel reduction on gpu over each point (xyz)
 				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
+				// 4 neighbouring frames
 				// rotations and translations = 6 paramters per frame
-				// we add 16 values per point pair per frame
-				Eigen::SparseMatrix<double> A(Nnear * 6 * totalNumPoints, 6* labeledPointClouds.size());
-				std::vector<Eigen::Triplet<double>> triplets(48 * totalNumPoints*Nnear);
-				Eigen::VectorXd b = Eigen::VectorXd::Zero(Nnear*6 * totalNumPoints);
+				//Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * totalNumPoints, 6 * labeledPointClouds.size());
+				//Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(4*6 * totalNumPoints, 6 * labeledPointClouds.size());
+
+				Eigen::SparseMatrix<double> A(4 * 6 * totalNumPoints, 6 * labeledPointClouds.size());
+				A.reserve(4 * 6 * totalNumPoints * 48);
+				Eigen::VectorXd b = Eigen::VectorXd::Zero(4 * 6 * totalNumPoints);
+
+				//Eigen::SparseMatrix<double> A(6 * totalNumPoints, 6 * labeledPointClouds.size());
+				//A.reserve(6 * totalNumPoints * 48);
+				//Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * totalNumPoints);
+				
+				double energy = 0.0;
+				
+				std::vector<Eigen::Triplet<double>> alltriplets;
+				alltriplets.reserve(4*labeledPointClouds.size()*totalNumPoints* 48);
+				//alltriplets.reserve(labeledPointClouds.size()*totalNumPoints* 48);
+
 				#pragma omp parallel for
 				for(int f = 0; f < labeledPointClouds.size(); f++)
 				{
+					setupLogThreadName();
+
+					int neighbourIndex = 0;
+					double local_energy = 0.0;
+
+					std::vector<Eigen::Triplet<double>> triplets;
+					triplets.reserve(totalNumPoints*48);
+
+					Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(4 * 6 * labeledPointClouds[f]->size(), 6 * labeledPointClouds.size());
+					//Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(6 * labeledPointClouds[f]->size(), 6 * labeledPointClouds.size());
+
 					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
 					for(const auto g : neighbouringFrames )
-					//for (int g = 0;g < labeledPointClouds.size(); g++)
 					{
-						if(g!=f)
+						if(g != f)
 						{
-							//std::vector<Eigen::Triplet<double>> triplets(12 * 6 * totalNumPoints);
 							std::vector<int> pointIdxNKNSearch(Nnear);
 							std::vector<float> pointNKNSquaredDistance(Nnear);
+							
 							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
 							{
+								std::vector<int> pointIdxNKNSearch(Nnear);
+								std::vector<float> pointNKNSquaredDistance(Nnear);
+
 								const auto& yfn = (*labeledPointClouds[f])[n];
 								auto numFoundPoints = kdtrees[g].nearestKSearch(yfn, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
 								for (int i = 0; i < numFoundPoints; i++)
@@ -1821,28 +1883,70 @@ public:
 									const auto& ygm = (*labeledPointClouds[g])[pointIdxNKNSearch[i]];
 
 									// No reason to precalculate "POld", as it get only calculated once with this implementation
-									double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f, g)) / variances(f, g);
-									int rowf = Nnear*6 * (cloudOffsets[f] + n) + 6*i;
-									int rowg = Nnear*6 * (cloudOffsets[f] + n) + 6*i + 3;
-									int colf = 6 * f;
-									int colg = 6 * g;
+									const double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f, g)) / variances(f, g);
 
-									Eigen::Matrix3d yfnhat = hat(yfn);
-									Eigen::Matrix3d ygmhat = hat(ygm);
+									// update energy
+									double distSquared = (yfn.x - ygm.x)*(yfn.x - ygm.x) + (yfn.y - ygm.y)*(yfn.y - ygm.y) + (yfn.z - ygm.z)*(yfn.z - ygm.z);
+									local_energy += pOverVar * distSquared / 2.0;
 
-									int tripletIndex = 48*(Nnear*(cloudOffsets[f] + n) + i);
+									//const int row = 6 * (cloudOffsets[f] + n);
+									
+									//const int row = 6 * ((labeledPointClouds.size()-1)*(cloudOffsets[f] + n) + neighbourIndex);
+
+									const int row = 6 * (4 * (cloudOffsets[f] + n) + neighbourIndex); // <-
+									const int row_ = 6 * (4 * n + neighbourIndex);
+
+									//const int row = 6*(cloudOffsets[f] + n);
+									//const int row_ = 6 * n ;
+
+									const int colf = 6 * f;
+									const int colg = 6 * g;
+
+									const Eigen::Matrix3d yfnhat = hat(yfn);
+									const Eigen::Matrix3d ygmhat = hat(ygm);
+
+									//int tripletIndex = 48 * (4*(Nnear*(cloudOffsets[f] + n) + i) + neighbourIndex);
 
 									// fill A
 									// I3
-									//A.block<3, 3>(rowf, colf) = pOverVar*Eigen::Matrix3d::Identity();
+									A_.block<3, 3>(row_, colf) += pOverVar*Eigen::Matrix3d::Identity();
+									/*
+									A.coeffRef(row + 0, colf + 0) += pOverVar;
+									A.coeffRef(row + 1, colf + 1) += pOverVar;
+									A.coeffRef(row + 2, colf + 2) += pOverVar;
+									*/
+									/*
+									triplets.push_back({ row + 0, colf + 0, pOverVar });
+									triplets.push_back({ row + 1, colf + 1, pOverVar });
+									triplets.push_back({ row + 2, colf + 2, pOverVar });
+									*/
+									/*
 									triplets[tripletIndex] = { rowf + 0, colf + 0 , pOverVar };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 1, colf + 1 , pOverVar };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 2, colf + 2 , pOverVar };
 									tripletIndex++;
+									*/
 									// -y_f,n hat
-									//A.block<3, 3>(rowf, colf + 3) = -pOverVar*yfnhat;
+									A_.block<3, 3>(row_, colf + 3) += -pOverVar*yfnhat;
+									/*
+									A.coeffRef(row + 0, colf + 3 + 1) += -pOverVar*yfnhat(0,1);
+									A.coeffRef(row + 0, colf + 3 + 2) += -pOverVar*yfnhat(0,2);
+									A.coeffRef(row + 1, colf + 3 + 0) += -pOverVar*yfnhat(1,0);
+									A.coeffRef(row + 1, colf + 3 + 2) += -pOverVar*yfnhat(1,2);
+									A.coeffRef(row + 2, colf + 3 + 0) += -pOverVar*yfnhat(2,0);
+									A.coeffRef(row + 2, colf + 3 + 1) += -pOverVar*yfnhat(2,1);
+									*/
+									/*
+									triplets.push_back({ row + 0, colf + 3 + 1, -pOverVar*yfnhat(0,1) });
+									triplets.push_back({ row + 0, colf + 3 + 2, -pOverVar*yfnhat(0,2) });
+									triplets.push_back({ row + 1, colf + 3 + 0, -pOverVar*yfnhat(1,0) });
+									triplets.push_back({ row + 1, colf + 3 + 2, -pOverVar*yfnhat(1,2) });
+									triplets.push_back({ row + 2, colf + 3 + 0, -pOverVar*yfnhat(2,0) });
+									triplets.push_back({ row + 2, colf + 3 + 1, -pOverVar*yfnhat(2,1) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowf + 0, colf + 3 + 1 , -pOverVar*yfnhat(0,1) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 0, colf + 3 + 2 , -pOverVar*yfnhat(0,2) };
@@ -1855,16 +1959,46 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 2, colf + 3 + 1 , -pOverVar*yfnhat(2,1) };
 									tripletIndex++;
+									*/
 									// -I3 
-									//A.block<3, 3>(rowf, colg) = -pOverVar*Eigen::Matrix3d::Identity();
+									A_.block<3, 3>(row_, colg) += -pOverVar*Eigen::Matrix3d::Identity();
+									/*
+									A.coeffRef(row + 0, colg + 0) += -pOverVar;
+									A.coeffRef(row + 1, colg + 1) += -pOverVar;
+									A.coeffRef(row + 2, colg + 2) += -pOverVar;
+									*/
+									/*
+									triplets.push_back({ row + 0, colg + 0, -pOverVar });
+									triplets.push_back({ row + 1, colg + 1, -pOverVar });
+									triplets.push_back({ row + 2, colg + 2, -pOverVar });
+									*/
+									/*
 									triplets[tripletIndex] = { rowf + 0, colg + 0 , -pOverVar };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 1, colg + 1 , -pOverVar };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 2, colg + 2 , -pOverVar };
 									tripletIndex++;
+									*/
 									// y_g,m hat
-									//A.block<3, 3>(rowf, colg + 3) = pOverVar*ygmhat;
+									A_.block<3, 3>(row_, colg + 3) += pOverVar*ygmhat;
+									/*
+									A.coeffRef(row + 0, colg + 3 + 1) += pOverVar*ygmhat(0,1);
+									A.coeffRef(row + 0, colg + 3 + 2) += pOverVar*ygmhat(0,2);
+									A.coeffRef(row + 1, colg + 3 + 0) += pOverVar*ygmhat(1,0);
+									A.coeffRef(row + 1, colg + 3 + 2) += pOverVar*ygmhat(1,2);
+									A.coeffRef(row + 2, colg + 3 + 0) += pOverVar*ygmhat(2,0);
+									A.coeffRef(row + 2, colg + 3 + 1) += pOverVar*ygmhat(2,1);
+									*/
+									/*
+									triplets.push_back({ row + 0, colg + 3 + 1, pOverVar*ygmhat(0,1) });
+									triplets.push_back({ row + 0, colg + 3 + 2, pOverVar*ygmhat(0,2) });
+									triplets.push_back({ row + 1, colg + 3 + 0, pOverVar*ygmhat(1,0) });
+									triplets.push_back({ row + 1, colg + 3 + 2, pOverVar*ygmhat(1,2) });
+									triplets.push_back({ row + 2, colg + 3 + 0, pOverVar*ygmhat(2,0) });
+									triplets.push_back({ row + 2, colg + 3 + 1, pOverVar*ygmhat(2,1) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowf + 0, colg + 3 + 1 , pOverVar*ygmhat(0,1) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 0, colg + 3 + 2 , pOverVar*ygmhat(0,2) };
@@ -1877,10 +2011,28 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 2, colg + 3 + 1 , pOverVar*ygmhat(2,1) };
 									tripletIndex++;
+									*/
 									// next row
 
 									// y_f,n hat
-									//A.block<3, 3>(rowg, colf) = pOverVar*yfnhat;
+									A_.block<3, 3>(row_ + 3, colf) += pOverVar*yfnhat;
+									/*
+									A.coeffRef(row + 3 + 0, colf + 0 + 1) += pOverVar*yfnhat(0,1);
+									A.coeffRef(row + 3 + 0, colf + 0 + 2) += pOverVar*yfnhat(0,2);
+									A.coeffRef(row + 3 + 1, colf + 0 + 0) += pOverVar*yfnhat(1,0);
+									A.coeffRef(row + 3 + 1, colf + 0 + 2) += pOverVar*yfnhat(1,2);
+									A.coeffRef(row + 3 + 2, colf + 0 + 0) += pOverVar*yfnhat(2,0);
+									A.coeffRef(row + 3 + 2, colf + 0 + 1) += pOverVar*yfnhat(2,1);
+									*/
+									/*
+									triplets.push_back({ row + 3 + 0, colf + 0 + 1, pOverVar*yfnhat(0,1) });
+									triplets.push_back({ row + 3 + 0, colf + 0 + 2, pOverVar*yfnhat(0,2) });
+									triplets.push_back({ row + 3 + 1, colf + 0 + 0, pOverVar*yfnhat(1,0) });
+									triplets.push_back({ row + 3 + 1, colf + 0 + 2, pOverVar*yfnhat(1,2) });
+									triplets.push_back({ row + 3 + 2, colf + 0 + 0, pOverVar*yfnhat(2,0) });
+									triplets.push_back({ row + 3 + 2, colf + 0 + 1, pOverVar*yfnhat(2,1) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowg + 0, colf + 0 + 1 , pOverVar*yfnhat(0,1) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 0, colf + 0 + 2 , pOverVar*yfnhat(0,2) };
@@ -1893,9 +2045,33 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 2, colf + 0 + 1 , pOverVar*yfnhat(2,1) };
 									tripletIndex++;
+									*/
 									// -y_f,n hat * y_f,n hat 
-									auto yfnhat2 = yfnhat*yfnhat;
-									//A.block<3, 3>(rowg, colf + 3) = -pOverVar*;
+									const auto yfnhat2 = yfnhat*yfnhat;
+									A_.block<3, 3>(row_ + 3, colf + 3) += -pOverVar*yfnhat2;
+									/*
+									A.coeffRef(row + 3 + 0, colf + 3 + 0) += -pOverVar*yfnhat2(0,0);
+									A.coeffRef(row + 3 + 0, colf + 3 + 1) += -pOverVar*yfnhat2(0,1);
+									A.coeffRef(row + 3 + 0, colf + 3 + 2) += -pOverVar*yfnhat2(0,2);
+									A.coeffRef(row + 3 + 1, colf + 3 + 0) += -pOverVar*yfnhat2(1,0);
+									A.coeffRef(row + 3 + 1, colf + 3 + 1) += -pOverVar*yfnhat2(1,1);
+									A.coeffRef(row + 3 + 1, colf + 3 + 2) += -pOverVar*yfnhat2(1,2);
+									A.coeffRef(row + 3 + 2, colf + 3 + 0) += -pOverVar*yfnhat2(2,0);
+									A.coeffRef(row + 3 + 2, colf + 3 + 1) += -pOverVar*yfnhat2(2,1);
+									A.coeffRef(row + 3 + 2, colf + 3 + 2) += -pOverVar*yfnhat2(2,2);
+									*/
+									/*
+									triplets.push_back({ row + 3 + 0, colf + 3 + 0, -pOverVar*yfnhat2(0,0) });
+									triplets.push_back({ row + 3 + 0, colf + 3 + 1, -pOverVar*yfnhat2(0,1) });
+									triplets.push_back({ row + 3 + 0, colf + 3 + 2, -pOverVar*yfnhat2(0,2) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 0, -pOverVar*yfnhat2(1,0) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 1, -pOverVar*yfnhat2(1,1) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 2, -pOverVar*yfnhat2(1,2) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 0, -pOverVar*yfnhat2(2,0) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 1, -pOverVar*yfnhat2(2,1) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 2, -pOverVar*yfnhat2(2,2) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowg + 0, colf + 3 + 0 , -pOverVar*yfnhat2(0,0) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 0, colf + 3 + 1 , -pOverVar*yfnhat2(0,1) };
@@ -1914,8 +2090,26 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 2, colf + 3 + 2 , -pOverVar*yfnhat2(2,2) };
 									tripletIndex++;
+									*/
 									// -y_f,n hat
-									//A.block<3, 3>(rowg, colg) = -pOverVar*yfnhat;
+									A_.block<3, 3>(row_ + 3, colg) += -pOverVar*yfnhat;
+									/*
+									A.coeffRef(row + 3 + 0, colg + 0 + 1) += -pOverVar*yfnhat(0,1);
+									A.coeffRef(row + 3 + 0, colg + 0 + 2) += -pOverVar*yfnhat(0,2);
+									A.coeffRef(row + 3 + 1, colg + 0 + 0) += -pOverVar*yfnhat(1,0);
+									A.coeffRef(row + 3 + 1, colg + 0 + 2) += -pOverVar*yfnhat(1,2);
+									A.coeffRef(row + 3 + 2, colg + 0 + 0) += -pOverVar*yfnhat(2,0);
+									A.coeffRef(row + 3 + 2, colg + 0 + 1) += -pOverVar*yfnhat(2,1);
+									*/
+									/*
+									triplets.push_back({ row + 3 + 0, colg + 0 + 1, -pOverVar*yfnhat(0,1) });
+									triplets.push_back({ row + 3 + 0, colg + 0 + 2, -pOverVar*yfnhat(0,2) });
+									triplets.push_back({ row + 3 + 1, colg + 0 + 0, -pOverVar*yfnhat(1,0) });
+									triplets.push_back({ row + 3 + 1, colg + 0 + 2, -pOverVar*yfnhat(1,2) });
+									triplets.push_back({ row + 3 + 2, colg + 0 + 0, -pOverVar*yfnhat(2,0) });
+									triplets.push_back({ row + 3 + 2, colg + 0 + 1, -pOverVar*yfnhat(2,1) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowg + 0, colg + 0 + 1 , -pOverVar*yfnhat(0,1) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 0, colg + 0 + 2 , -pOverVar*yfnhat(0,2) };
@@ -1928,9 +2122,33 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 2, colg + 0 + 1 , -pOverVar*yfnhat(2,1) };
 									tripletIndex++;
+									*/
 									// y_f,n hat * y_g,m hat 
-									auto yfngmhat = yfnhat*ygmhat;
-									//A.block<3, 3>(rowg, colg + 3) = pOverVar*yfnhat*ygmhat;
+									const auto yfngmhat = yfnhat*ygmhat;
+									A_.block<3, 3>(row_ + 3, colg + 3) += pOverVar*yfngmhat;
+									/*
+									A.coeffRef(row + 3 + 0, colf + 3 + 0) += pOverVar*yfngmhat(0,0);
+									A.coeffRef(row + 3 + 0, colf + 3 + 1) += pOverVar*yfngmhat(0,1);
+									A.coeffRef(row + 3 + 0, colf + 3 + 2) += pOverVar*yfngmhat(0,2);
+									A.coeffRef(row + 3 + 1, colf + 3 + 0) += pOverVar*yfngmhat(1,0);
+									A.coeffRef(row + 3 + 1, colf + 3 + 1) += pOverVar*yfngmhat(1,1);
+									A.coeffRef(row + 3 + 1, colf + 3 + 2) += pOverVar*yfngmhat(1,2);
+									A.coeffRef(row + 3 + 2, colf + 3 + 0) += pOverVar*yfngmhat(2,0);
+									A.coeffRef(row + 3 + 2, colf + 3 + 1) += pOverVar*yfngmhat(2,1);
+									A.coeffRef(row + 3 + 2, colf + 3 + 2) += pOverVar*yfngmhat(2,2);
+									*/
+									/*
+									triplets.push_back({ row + 3 + 0, colf + 3 + 0, pOverVar*yfngmhat(0,0) });
+									triplets.push_back({ row + 3 + 0, colf + 3 + 1, pOverVar*yfngmhat(0,1) });
+									triplets.push_back({ row + 3 + 0, colf + 3 + 2, pOverVar*yfngmhat(0,2) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 0, pOverVar*yfngmhat(1,0) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 1, pOverVar*yfngmhat(1,1) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 2, pOverVar*yfngmhat(1,2) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 0, pOverVar*yfngmhat(2,0) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 1, pOverVar*yfngmhat(2,1) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 2, pOverVar*yfngmhat(2,2) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowg + 0, colg + 3 + 0 , pOverVar*yfngmhat(0,0) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 0, colg + 3 + 1 , pOverVar*yfngmhat(0,1) };
@@ -1949,42 +2167,137 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 2, colg + 3 + 2 , pOverVar*yfngmhat(2,2) };
 									tripletIndex++;
-
+									*/
 									// fill b
-									b(rowf + 0) = pOverVar*(ygm.x - yfn.x);
-									b(rowf + 1) = pOverVar*(ygm.y - yfn.y);
-									b(rowf + 2) = pOverVar*(ygm.z - yfn.z);
+									b(row + 0) += pOverVar*(ygm.x - yfn.x);
+									b(row + 1) += pOverVar*(ygm.y - yfn.y);
+									b(row + 2) += pOverVar*(ygm.z - yfn.z);
 
-									b(rowg + 0) = pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
-									b(rowg + 1) = pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
-									b(rowg + 2) = pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
+									b(row + 3 + 0) += pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
+									b(row + 3 + 1) += pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
+									b(row + 3 + 2) += pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
 								}
 							}
+
+							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
+							{
+								//const int row = 6 * (cloudOffsets[f] + n);
+								//const int row_ = 6 * n;
+
+								const int row = 6 * (4 * (cloudOffsets[f] + n) + neighbourIndex);
+								const int row_ = 6 * (4 * n + neighbourIndex);
+								
+								const int colf = 6 * f;
+								const int colg = 6 * g;
+
+								triplets.push_back({row + 0, colf + 0, A_(row_ + 0, colf + 0)});
+								triplets.push_back({row + 1, colf + 1, A_(row_ + 1, colf + 1)});
+								triplets.push_back({row + 2, colf + 2, A_(row_ + 2, colf + 2)});
+								// -y_f,n hat
+								triplets.push_back({row + 0, colf + 3 + 1, A_(row_ + 0, colf + 3 + 1)});
+								triplets.push_back({row + 0, colf + 3 + 2, A_(row_ + 0, colf + 3 + 2)});
+								triplets.push_back({row + 1, colf + 3 + 0, A_(row_ + 1, colf + 3 + 0)});
+								triplets.push_back({row + 1, colf + 3 + 2, A_(row_ + 1, colf + 3 + 2)});
+								triplets.push_back({row + 2, colf + 3 + 0, A_(row_ + 2, colf + 3 + 0)});
+								triplets.push_back({row + 2, colf + 3 + 1, A_(row_ + 2, colf + 3 + 1)});
+								// -I3 
+								triplets.push_back({row + 0, colg + 0, A_(row_ + 0, colg + 0)});
+								triplets.push_back({row + 1, colg + 1, A_(row_ + 1, colg + 1)});
+								triplets.push_back({row + 2, colg + 2, A_(row_ + 2, colg + 2)});
+								// y_g,m hat
+								triplets.push_back({row + 0, colg + 3 + 1, A_(row_ + 0, colg + 3 + 1)});
+								triplets.push_back({row + 0, colg + 3 + 2, A_(row_ + 0, colg + 3 + 2)});
+								triplets.push_back({row + 1, colg + 3 + 0, A_(row_ + 1, colg + 3 + 0)});
+								triplets.push_back({row + 1, colg + 3 + 2, A_(row_ + 1, colg + 3 + 2)});
+								triplets.push_back({row + 2, colg + 3 + 0, A_(row_ + 2, colg + 3 + 0)});
+								triplets.push_back({row + 2, colg + 3 + 1, A_(row_ + 2, colg + 3 + 1)});
+								// next row
+								// y_f,n hat
+								triplets.push_back({row + 3 + 0, colf + 3 + 1, A_(row_ + 3 + 0, colf + 3 + 1)});
+								triplets.push_back({row + 3 + 0, colf + 3 + 2, A_(row_ + 3 + 0, colf + 3 + 2)});
+								triplets.push_back({row + 3 + 1, colf + 3 + 0, A_(row_ + 3 + 1, colf + 3 + 0)});
+								triplets.push_back({row + 3 + 1, colf + 3 + 2, A_(row_ + 3 + 1, colf + 3 + 2)});
+								triplets.push_back({row + 3 + 2, colf + 3 + 0, A_(row_ + 3 + 2, colf + 3 + 0)});
+								triplets.push_back({row + 3 + 2, colf + 3 + 1, A_(row_ + 3 + 2, colf + 3 + 1)});
+								// -y_f,n hat * y_f,n hat 
+								triplets.push_back({row + 3 + 0, colf + 3 + 0, A_(row_ + 3 + 0, colf + 3 + 0)});
+								triplets.push_back({row + 3 + 0, colf + 3 + 1, A_(row_ + 3 + 0, colf + 3 + 1)});
+								triplets.push_back({row + 3 + 0, colf + 3 + 2, A_(row_ + 3 + 0, colf + 3 + 2)});
+								triplets.push_back({row + 3 + 1, colf + 3 + 0, A_(row_ + 3 + 1, colf + 3 + 0)});
+								triplets.push_back({row + 3 + 1, colf + 3 + 1, A_(row_ + 3 + 1, colf + 3 + 1)});
+								triplets.push_back({row + 3 + 1, colf + 3 + 2, A_(row_ + 3 + 1, colf + 3 + 2)});
+								triplets.push_back({row + 3 + 2, colf + 3 + 0, A_(row_ + 3 + 2, colf + 3 + 0)});
+								triplets.push_back({row + 3 + 2, colf + 3 + 1, A_(row_ + 3 + 2, colf + 3 + 1)});
+								triplets.push_back({row + 3 + 2, colf + 3 + 2, A_(row_ + 3 + 2, colf + 3 + 2)});
+								// -y_f,n hat
+								triplets.push_back({row + 3 + 0, colg + 3 + 1, A_(row_ + 3 + 0, colg + 3 + 1)});
+								triplets.push_back({row + 3 + 0, colg + 3 + 2, A_(row_ + 3 + 0, colg + 3 + 2)});
+								triplets.push_back({row + 3 + 1, colg + 3 + 0, A_(row_ + 3 + 1, colg + 3 + 0)});
+								triplets.push_back({row + 3 + 1, colg + 3 + 2, A_(row_ + 3 + 1, colg + 3 + 2)});
+								triplets.push_back({row + 3 + 2, colg + 3 + 0, A_(row_ + 3 + 2, colg + 3 + 0)});
+								triplets.push_back({row + 3 + 2, colg + 3 + 1, A_(row_ + 3 + 2, colg + 3 + 1)});
+								// y_f,n hat * y_g,m hat 
+								triplets.push_back({row + 3 + 0, colg + 3 + 0, A_(row_ + 3 + 0, colg + 3 + 0)});
+								triplets.push_back({row + 3 + 0, colg + 3 + 1, A_(row_ + 3 + 0, colg + 3 + 1)});
+								triplets.push_back({row + 3 + 0, colg + 3 + 2, A_(row_ + 3 + 0, colg + 3 + 2)});
+								triplets.push_back({row + 3 + 1, colg + 3 + 0, A_(row_ + 3 + 1, colg + 3 + 0)});
+								triplets.push_back({row + 3 + 1, colg + 3 + 1, A_(row_ + 3 + 1, colg + 3 + 1)});
+								triplets.push_back({row + 3 + 1, colg + 3 + 2, A_(row_ + 3 + 1, colg + 3 + 2)});
+								triplets.push_back({row + 3 + 2, colg + 3 + 0, A_(row_ + 3 + 2, colg + 3 + 0)});
+								triplets.push_back({row + 3 + 2, colg + 3 + 1, A_(row_ + 3 + 2, colg + 3 + 1)});
+								triplets.push_back({row + 3 + 2, colg + 3 + 2, A_(row_ + 3 + 2, colg + 3 + 2)});
+							}
+							neighbourIndex++;
 						}
 					}
+
+					#pragma omp critical
+					{
+						//A.setFromTriplets(triplets.begin(), triplets.end());
+						alltriplets.insert(alltriplets.end(), triplets.begin(), triplets.end());
+						energy += local_energy;
+					}
 				}
-				A.setFromTriplets(triplets.begin(), triplets.end());
+				//A.setFromTriplets(triplets.begin(), triplets.end());
+				A.setFromTriplets(alltriplets.begin(), alltriplets.end());
 				auto endTimeEQBuild = std::chrono::high_resolution_clock::now();
 				auto EQBuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQBuild - startTimeEQBuild).count();
 				
 				// solve equation system Ax=b to find rotation and translation deltas
 				auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
-				Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> solver(A);
+				Eigen::SPQR<Eigen::SparseMatrix<double>> solver(A);
 				if (solver.info() != Eigen::ComputationInfo::Success)
 				{
-					LOG_S(WARNING) << "Shit hits the fan." << solver.info();
+					LOG_S(WARNING) << "Shit hits the fan (1)";
 					break;
 				}
 				Eigen::VectorXd delta = solver.solve(b);
 				if (solver.info() != Eigen::ComputationInfo::Success)
 				{
-					LOG_S(WARNING) << "Shit hits the fan." << solver.info();
+					LOG_S(WARNING) << "Shit hits the fan (2)";
 					break;
 				}
-				//Eigen::VectorXd delta = A.fullPivHouseholderQr().solve(b);
+				/*
+				Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> solver(A);
+				if (solver.info() != Eigen::ComputationInfo::Success) 
+				{
+					LOG_S(WARNING) << "Shit hits the fan: " << solver.lastErrorMessage();
+					break;
+				}
+				Eigen::VectorXd delta = solver.solve(b);
+				if (solver.info() != Eigen::ComputationInfo::Success)
+				{
+					LOG_S(WARNING) << "Shit hits the fan: " << solver.lastErrorMessage();
+					break;
+				}
+				*/
+				//Eigen::JacobiSVD<Eigen::MatrixXd, Eigen::FullPivHouseholderQRPreconditioner> solver(A_, Eigen::ComputeFullU | Eigen::ComputeFullV);
+				//Eigen::VectorXd delta = solver.solve(b);
+				//LOG_S(INFO) << "Singular Values:" << solver.singularValues();
+				
 				auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
 				auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
-				error = delta.squaredNorm();
+				gradient = delta.squaredNorm();
 				
 
 				for (int f = 0;f < labeledPointClouds.size();f++)
@@ -1996,14 +2309,10 @@ public:
 					Eigen::Vector3d m(delta(transOffset), delta(transOffset + 1), delta(transOffset + 2));
 					double phi = l.norm();
 					Eigen::Affine3d trafo = Eigen::Affine3d::Identity();
-					if (phi > 0.0001 || phi < -0.0001)
+					if (phi > 0.001 || phi < -0.001)
 					{
 						double phi2 = phi*phi;
-						Eigen::Matrix3d lhat;
-						lhat << 
-							0, -l(2), l(1),
-							l(2), 0, -l(0),
-							-l(1), l(0), 0;
+						auto lhat = hat(l);
 						auto lhat2 = lhat*lhat;
 						auto R = Eigen::Matrix3d::Identity() + (lhat*sin(phi)) / phi + lhat2*(1 - cos(phi)) / phi2;
 						trafo(0, 0) = R(0, 0);trafo(0, 1) = R(0, 1);trafo(0, 2) = R(0, 2);
@@ -2014,19 +2323,59 @@ public:
 						trafo(0, 3) = t(0);
 						trafo(1, 3) = t(1);
 						trafo(2, 3) = t(2);
+
+						Eigen::IOFormat CommaInitFmt(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", ", ", "", "", " << ", ";");
+						//LOG_S(INFO) << "R: " << phi << "around " << l.format(CommaInitFmt) << " T:" << t.format(CommaInitFmt);
 					}
 					else
 					{
 						trafo(0, 3) = m(0);
 						trafo(1, 3) = m(1);
 						trafo(2, 3) = m(2);
+						Eigen::IOFormat CommaInitFmt(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", ", ", "", "", " << ", ";");
+						//LOG_S(INFO) << " T:" << m.format(CommaInitFmt);
 					}
 					pcl::transformPointCloud(*labeledPointClouds[f], *labeledPointClouds[f], trafo);
 				}
 
 				iteration++;
-				LOG_F(INFO, "%-5i | %-15f | %-15i | %-15i | %-15i | %-15i", iteration, error, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime);
-			} while (iteration < maxIterations && error > errorBound);
+				auto relativeError = (A*delta - b).norm() / b.norm();
+				/*
+				double energy = 0;
+				// add E_data
+#pragma omp parallel for
+				for (int f = 0; f < labeledPointClouds.size(); f++)
+				{
+					double energy_f = 0;
+					for (int g = 0; g < labeledPointClouds.size(); g++)
+					{
+						//if (f != g)
+						{
+							const double minus2var = -2 * variances(f, g);
+							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
+							{
+								double local_sum = 0;
+								const auto& yfn = (*labeledPointClouds[f])[n];
+								for (int m = 0; m < labeledPointClouds[g]->size(); m++)
+								{
+									const auto& ygm = (*labeledPointClouds[g])[m];
+									double distSquared = (yfn.x - ygm.x)*(yfn.x - ygm.x) + (yfn.y - ygm.y)*(yfn.y - ygm.y) + (yfn.z - ygm.z)*(yfn.z - ygm.z);
+									local_sum += exp(distSquared / minus2var);
+								}
+								energy_f -= log(local_sum);
+							}
+						}
+					}
+
+#pragma omp critical
+					{
+						energy += energy_f;
+					}
+				}
+				*/
+				LOG_F(INFO, "%-5i | %-10f | %-10i | %-10i | %-10i | %-10i | %-10f | %-10f ", iteration, gradient, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime, relativeError, energy);
+				//LOG_F(INFO, "%-5i | %-10f | %-10i | %-10i | %-10i | %-10i | %-10f | %i,%i,%i", iteration, gradient, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime, relativeError, solver.rows(), solver.cols(), solver.rank());
+			} while (iteration < maxIterations && gradient > errorBound);
 		}
 
 		// -------- initial segmentation ----------
@@ -2038,6 +2387,8 @@ public:
 		#pragma omp parallel for
 		for (int f = 0;f < labeledPointClouds.size();f++) 
 		{
+			setupLogThreadName();
+
 			///@todo factor out this code, parametrize it an implement an automatic optimal parameter calculation
 			std::vector<int> pointIdxNKNSearch(Nnear);
 			std::vector<float> pointNKNSquaredDistance(Nnear);
@@ -2192,7 +2543,7 @@ public:
 		}
 
 		// non-rigid registration
-		nonrigidtest(labeledPointClouds, cluster_indices);
+		//nonrigidtest(labeledPointClouds, cluster_indices);
 
 		// merge point clouds
 		pcl::PointCloud<pcl::PointXYZRGBL> completePointCloud;
@@ -2241,9 +2592,9 @@ public:
 		}
 
 		{
-			constexpr int maxIterations = 5;
-			constexpr double alpha = 0.8;
-			constexpr double errorBound = 0.01;
+			const int maxIterations = maxIterNonRigid;
+			const double alpha = alphaEq;
+			constexpr double errorBound = 0.0001;
 
 			std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL>> kdtrees(labeledPointClouds.size());
 			std::vector<int> pointIdxNKNSearch(Nnear);
@@ -2275,16 +2626,17 @@ public:
 				// Reestimate joint locations
 				typedef pcl::CentroidPoint<pcl::PointXYZ> CentroidXYZ;
 				std::vector< std::map<uint32_t, std::map<uint32_t, CentroidXYZ> > > jointEstimations(labeledPointClouds.size());
-				for (int f = 0;f < labeledPointClouds.size();f++)
+				#pragma omp parallel for
+				for (int f = 0;f < labeledPointCloudsTransformed.size();f++)
 				{
 					jointEstimations[f] = estimateBallJointLocations(labeledPointCloudsTransformed[f], cluster_indices[f], kdtrees[f]);
 				}
 
 				// update variance
 				auto startTimeVariance = std::chrono::high_resolution_clock::now();
-				Eigen::VectorXd variances(labeledPointClouds.size());
+				Eigen::VectorXd variances(labeledPointCloudsTransformed.size());
 				#pragma omp parallel for
-				for (int f = 0; f < labeledPointClouds.size(); f++)
+				for (int f = 0; f < labeledPointCloudsTransformed.size(); f++)
 				{
 					variances(f) = calculateVariance<pcl::PointXYZRGBL>(labeledPointCloudsTransformed[f], kdtrees[f]);
 				}
@@ -2293,15 +2645,15 @@ public:
 
 				// acquire offsets and point indices
 				std::vector<std::vector<pcl::PointIndices>> labeledPoints(labeledPointClouds.size());
-				for (int f = 0; f<labeledPointClouds.size(); f++)
+				for (int f = 0; f<labeledPointCloudsTransformed.size(); f++)
 				{
-					labeledPoints[f] = getLabelIndices(labeledPointClouds[f]);
+					labeledPoints[f] = getLabelIndices(labeledPointCloudsTransformed[f]);
 				}
-				std::vector<int> labelOffsets(labeledPointClouds.size());
-				std::vector<int> jointOffsets(labeledPointClouds.size());
+				std::vector<int> labelOffsets(labeledPointCloudsTransformed.size());
+				std::vector<int> jointOffsets(labeledPointCloudsTransformed.size());
 				int totalNumLabels = 0;
 				int totalNumJoints = 0;
-				for (int f = 0; f<labeledPointClouds.size(); f++)
+				for (int f = 0; f<labeledPointCloudsTransformed.size(); f++)
 				{
 					labelOffsets[f] = totalNumLabels;
 					totalNumLabels += labeledPoints[f].size();
@@ -2314,54 +2666,96 @@ public:
 				
 				// precompute components of Q for all y and f
 				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
-				//Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * (totalNumPoints + totalNumJoints), 6 * totalNumLabels );
-				//Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * (totalNumPoints + totalNumJoints));
+				Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(6 * (4*totalNumPoints + totalNumJoints), 6 * totalNumLabels );
 
-				Eigen::SparseMatrix<double> A(6 * (Nnear*totalNumPoints + totalNumJoints), 6 * totalNumLabels);
-				std::vector<Eigen::Triplet<double>> triplets(48 * (totalNumPoints*Nnear + totalNumJoints));
-				Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * (Nnear*totalNumPoints + totalNumJoints));
+				Eigen::SparseMatrix<double> A(6 * (4*totalNumPoints + totalNumJoints), 6 * totalNumLabels);
+				std::vector<Eigen::Triplet<double>> alltriplets(6*48*(4*totalNumPoints + totalNumJoints));
+				Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * (4*totalNumPoints + totalNumJoints));
+
 				#pragma omp parallel for
-				for (int f = 0; f < labeledPointClouds.size(); f++)
+				for (int f = 0; f < labeledPointCloudsTransformed.size(); f++)
 				{
-					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
+					setupLogThreadName();
+
+					int neighbourIndex = 0;
+					double local_energy = 0.0;
+
+					std::vector<Eigen::Triplet<double>> triplets;
+					triplets.reserve(totalNumPoints * 48);
+
+					//Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(4 * 6 * labeledPointClouds[f]->size(), 6 * totalNumLabels);
+
+					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointCloudsTransformed.size()) % labeledPointCloudsTransformed.size(), (f - 1 + labeledPointCloudsTransformed.size()) % labeledPointCloudsTransformed.size(), (f + 1) % labeledPointCloudsTransformed.size(), (f + 2) % labeledPointCloudsTransformed.size() };
 					for (const auto g : neighbouringFrames)
-						//for (int g = 0;g < labeledPointClouds.size(); g++)
+						//for (int g = 0;g < labeledPointCloudsTransformed.size(); g++)
 					{
 						if (g != f)
 						{
-							//std::vector<Eigen::Triplet<double>> triplets(labeledPointClouds[f]->size()*Nnear*16);
+							//std::vector<Eigen::Triplet<double>> triplets(labeledPointCloudsTransformed[f]->size()*Nnear*16);
 							std::vector<int> pointIdxNKNSearch(Nnear);
 							std::vector<float> pointNKNSquaredDistance(Nnear);
-							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
+							for (int n = 0; n < labeledPointCloudsTransformed[f]->size(); n++)
 							{
-								const auto& yfn = (*labeledPointClouds[f])[n];
+								const auto& yfn = (*labeledPointCloudsTransformed[f])[n];
 								auto numFoundPoints = kdtrees[g].nearestKSearch(yfn, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
 								for (int i = 0; i < numFoundPoints; i++)
 								{
-									const auto& ygm = (*labeledPointClouds[g])[pointIdxNKNSearch[i]];
+									const auto& ygm = (*labeledPointCloudsTransformed[g])[pointIdxNKNSearch[i]];
 
 									// No reason to precalculate "POld", as it get only calculated once with this implementation
 									double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f, g)) / variances(f, g);
-									int rowf = 20 * 6 * (cloudOffsets[f] + n) + 6 * i;
-									int rowg = 20 * 6 * (cloudOffsets[f] + n) + 6 * i + 3;
-									int colf = 6 * f;
-									int colg = 6 * g;
+
+									const int row = 6 * (4 * (cloudOffsets[f] + n) + neighbourIndex); // <-
+									//const int row_ = 6 * (4 * n + neighbourIndex);
+									const int row_ = row;
+
+									int colf = 6 * (labelOffsets[f] + yfn.label);
+									int colg = 6 * (labelOffsets[g] + ygm.label);
 
 									Eigen::Matrix3d yfnhat = hat(yfn);
 									Eigen::Matrix3d ygmhat = hat(ygm);
-									int tripletIndex = 48 * (Nnear*(cloudOffsets[f] + n) + i);
+									int tripletIndex = 48 * (4* (Nnear*(cloudOffsets[f] + n) + i) + neighbourIndex);
 
 									// fill A
 									// I3
-									//A.block<3, 3>(rowf, colf) = pOverVar*Eigen::Matrix3d::Identity();
+									A_.block<3, 3>(row_, colf) += pOverVar*Eigen::Matrix3d::Identity();
+									/*
+									A.coeffRef(row + 0, colf + 0) += pOverVar;
+									A.coeffRef(row + 1, colf + 1) += pOverVar;
+									A.coeffRef(row + 2, colf + 2) += pOverVar;
+									*/
+									/*
+									triplets.push_back({ row + 0, colf + 0, pOverVar });
+									triplets.push_back({ row + 1, colf + 1, pOverVar });
+									triplets.push_back({ row + 2, colf + 2, pOverVar });
+									*/
+									/*
 									triplets[tripletIndex] = { rowf + 0, colf + 0 , pOverVar };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 1, colf + 1 , pOverVar };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 2, colf + 2 , pOverVar };
 									tripletIndex++;
+									*/
 									// -y_f,n hat
-									//A.block<3, 3>(rowf, colf + 3) = -pOverVar*yfnhat;
+									A_.block<3, 3>(row_, colf + 3) += -pOverVar*yfnhat;
+									/*
+									A.coeffRef(row + 0, colf + 3 + 1) += -pOverVar*yfnhat(0,1);
+									A.coeffRef(row + 0, colf + 3 + 2) += -pOverVar*yfnhat(0,2);
+									A.coeffRef(row + 1, colf + 3 + 0) += -pOverVar*yfnhat(1,0);
+									A.coeffRef(row + 1, colf + 3 + 2) += -pOverVar*yfnhat(1,2);
+									A.coeffRef(row + 2, colf + 3 + 0) += -pOverVar*yfnhat(2,0);
+									A.coeffRef(row + 2, colf + 3 + 1) += -pOverVar*yfnhat(2,1);
+									*/
+									/*
+									triplets.push_back({ row + 0, colf + 3 + 1, -pOverVar*yfnhat(0,1) });
+									triplets.push_back({ row + 0, colf + 3 + 2, -pOverVar*yfnhat(0,2) });
+									triplets.push_back({ row + 1, colf + 3 + 0, -pOverVar*yfnhat(1,0) });
+									triplets.push_back({ row + 1, colf + 3 + 2, -pOverVar*yfnhat(1,2) });
+									triplets.push_back({ row + 2, colf + 3 + 0, -pOverVar*yfnhat(2,0) });
+									triplets.push_back({ row + 2, colf + 3 + 1, -pOverVar*yfnhat(2,1) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowf + 0, colf + 3 + 1 , -pOverVar*yfnhat(0,1) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 0, colf + 3 + 2 , -pOverVar*yfnhat(0,2) };
@@ -2374,16 +2768,46 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 2, colf + 3 + 1 , -pOverVar*yfnhat(2,1) };
 									tripletIndex++;
+									*/
 									// -I3 
-									//A.block<3, 3>(rowf, colg) = -pOverVar*Eigen::Matrix3d::Identity();
+									A_.block<3, 3>(row_, colg) += -pOverVar*Eigen::Matrix3d::Identity();
+									/*
+									A.coeffRef(row + 0, colg + 0) += -pOverVar;
+									A.coeffRef(row + 1, colg + 1) += -pOverVar;
+									A.coeffRef(row + 2, colg + 2) += -pOverVar;
+									*/
+									/*
+									triplets.push_back({ row + 0, colg + 0, -pOverVar });
+									triplets.push_back({ row + 1, colg + 1, -pOverVar });
+									triplets.push_back({ row + 2, colg + 2, -pOverVar });
+									*/
+									/*
 									triplets[tripletIndex] = { rowf + 0, colg + 0 , -pOverVar };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 1, colg + 1 , -pOverVar };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 2, colg + 2 , -pOverVar };
 									tripletIndex++;
+									*/
 									// y_g,m hat
-									//A.block<3, 3>(rowf, colg + 3) = pOverVar*ygmhat;
+									A_.block<3, 3>(row_, colg + 3) += pOverVar*ygmhat;
+									/*
+									A.coeffRef(row + 0, colg + 3 + 1) += pOverVar*ygmhat(0,1);
+									A.coeffRef(row + 0, colg + 3 + 2) += pOverVar*ygmhat(0,2);
+									A.coeffRef(row + 1, colg + 3 + 0) += pOverVar*ygmhat(1,0);
+									A.coeffRef(row + 1, colg + 3 + 2) += pOverVar*ygmhat(1,2);
+									A.coeffRef(row + 2, colg + 3 + 0) += pOverVar*ygmhat(2,0);
+									A.coeffRef(row + 2, colg + 3 + 1) += pOverVar*ygmhat(2,1);
+									*/
+									/*
+									triplets.push_back({ row + 0, colg + 3 + 1, pOverVar*ygmhat(0,1) });
+									triplets.push_back({ row + 0, colg + 3 + 2, pOverVar*ygmhat(0,2) });
+									triplets.push_back({ row + 1, colg + 3 + 0, pOverVar*ygmhat(1,0) });
+									triplets.push_back({ row + 1, colg + 3 + 2, pOverVar*ygmhat(1,2) });
+									triplets.push_back({ row + 2, colg + 3 + 0, pOverVar*ygmhat(2,0) });
+									triplets.push_back({ row + 2, colg + 3 + 1, pOverVar*ygmhat(2,1) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowf + 0, colg + 3 + 1 , pOverVar*ygmhat(0,1) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 0, colg + 3 + 2 , pOverVar*ygmhat(0,2) };
@@ -2396,10 +2820,28 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowf + 2, colg + 3 + 1 , pOverVar*ygmhat(2,1) };
 									tripletIndex++;
+									*/
 									// next row
 
 									// y_f,n hat
-									//A.block<3, 3>(rowg, colf) = pOverVar*yfnhat;
+									A_.block<3, 3>(row_ + 3, colf) += pOverVar*yfnhat;
+									/*
+									A.coeffRef(row + 3 + 0, colf + 0 + 1) += pOverVar*yfnhat(0,1);
+									A.coeffRef(row + 3 + 0, colf + 0 + 2) += pOverVar*yfnhat(0,2);
+									A.coeffRef(row + 3 + 1, colf + 0 + 0) += pOverVar*yfnhat(1,0);
+									A.coeffRef(row + 3 + 1, colf + 0 + 2) += pOverVar*yfnhat(1,2);
+									A.coeffRef(row + 3 + 2, colf + 0 + 0) += pOverVar*yfnhat(2,0);
+									A.coeffRef(row + 3 + 2, colf + 0 + 1) += pOverVar*yfnhat(2,1);
+									*/
+									/*
+									triplets.push_back({ row + 3 + 0, colf + 0 + 1, pOverVar*yfnhat(0,1) });
+									triplets.push_back({ row + 3 + 0, colf + 0 + 2, pOverVar*yfnhat(0,2) });
+									triplets.push_back({ row + 3 + 1, colf + 0 + 0, pOverVar*yfnhat(1,0) });
+									triplets.push_back({ row + 3 + 1, colf + 0 + 2, pOverVar*yfnhat(1,2) });
+									triplets.push_back({ row + 3 + 2, colf + 0 + 0, pOverVar*yfnhat(2,0) });
+									triplets.push_back({ row + 3 + 2, colf + 0 + 1, pOverVar*yfnhat(2,1) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowg + 0, colf + 0 + 1 , pOverVar*yfnhat(0,1) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 0, colf + 0 + 2 , pOverVar*yfnhat(0,2) };
@@ -2412,9 +2854,33 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 2, colf + 0 + 1 , pOverVar*yfnhat(2,1) };
 									tripletIndex++;
+									*/
 									// -y_f,n hat * y_f,n hat 
-									auto yfnhat2 = yfnhat*yfnhat;
-									//A.block<3, 3>(rowg, colf + 3) = -pOverVar*;
+									const auto yfnhat2 = yfnhat*yfnhat;
+									A_.block<3, 3>(row_ + 3, colf + 3) += -pOverVar*yfnhat2;
+									/*
+									A.coeffRef(row + 3 + 0, colf + 3 + 0) += -pOverVar*yfnhat2(0,0);
+									A.coeffRef(row + 3 + 0, colf + 3 + 1) += -pOverVar*yfnhat2(0,1);
+									A.coeffRef(row + 3 + 0, colf + 3 + 2) += -pOverVar*yfnhat2(0,2);
+									A.coeffRef(row + 3 + 1, colf + 3 + 0) += -pOverVar*yfnhat2(1,0);
+									A.coeffRef(row + 3 + 1, colf + 3 + 1) += -pOverVar*yfnhat2(1,1);
+									A.coeffRef(row + 3 + 1, colf + 3 + 2) += -pOverVar*yfnhat2(1,2);
+									A.coeffRef(row + 3 + 2, colf + 3 + 0) += -pOverVar*yfnhat2(2,0);
+									A.coeffRef(row + 3 + 2, colf + 3 + 1) += -pOverVar*yfnhat2(2,1);
+									A.coeffRef(row + 3 + 2, colf + 3 + 2) += -pOverVar*yfnhat2(2,2);
+									*/
+									/*
+									triplets.push_back({ row + 3 + 0, colf + 3 + 0, -pOverVar*yfnhat2(0,0) });
+									triplets.push_back({ row + 3 + 0, colf + 3 + 1, -pOverVar*yfnhat2(0,1) });
+									triplets.push_back({ row + 3 + 0, colf + 3 + 2, -pOverVar*yfnhat2(0,2) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 0, -pOverVar*yfnhat2(1,0) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 1, -pOverVar*yfnhat2(1,1) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 2, -pOverVar*yfnhat2(1,2) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 0, -pOverVar*yfnhat2(2,0) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 1, -pOverVar*yfnhat2(2,1) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 2, -pOverVar*yfnhat2(2,2) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowg + 0, colf + 3 + 0 , -pOverVar*yfnhat2(0,0) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 0, colf + 3 + 1 , -pOverVar*yfnhat2(0,1) };
@@ -2433,8 +2899,26 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 2, colf + 3 + 2 , -pOverVar*yfnhat2(2,2) };
 									tripletIndex++;
+									*/
 									// -y_f,n hat
-									//A.block<3, 3>(rowg, colg) = -pOverVar*yfnhat;
+									A_.block<3, 3>(row_ + 3, colg) += -pOverVar*yfnhat;
+									/*
+									A.coeffRef(row + 3 + 0, colg + 0 + 1) += -pOverVar*yfnhat(0,1);
+									A.coeffRef(row + 3 + 0, colg + 0 + 2) += -pOverVar*yfnhat(0,2);
+									A.coeffRef(row + 3 + 1, colg + 0 + 0) += -pOverVar*yfnhat(1,0);
+									A.coeffRef(row + 3 + 1, colg + 0 + 2) += -pOverVar*yfnhat(1,2);
+									A.coeffRef(row + 3 + 2, colg + 0 + 0) += -pOverVar*yfnhat(2,0);
+									A.coeffRef(row + 3 + 2, colg + 0 + 1) += -pOverVar*yfnhat(2,1);
+									*/
+									/*
+									triplets.push_back({ row + 3 + 0, colg + 0 + 1, -pOverVar*yfnhat(0,1) });
+									triplets.push_back({ row + 3 + 0, colg + 0 + 2, -pOverVar*yfnhat(0,2) });
+									triplets.push_back({ row + 3 + 1, colg + 0 + 0, -pOverVar*yfnhat(1,0) });
+									triplets.push_back({ row + 3 + 1, colg + 0 + 2, -pOverVar*yfnhat(1,2) });
+									triplets.push_back({ row + 3 + 2, colg + 0 + 0, -pOverVar*yfnhat(2,0) });
+									triplets.push_back({ row + 3 + 2, colg + 0 + 1, -pOverVar*yfnhat(2,1) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowg + 0, colg + 0 + 1 , -pOverVar*yfnhat(0,1) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 0, colg + 0 + 2 , -pOverVar*yfnhat(0,2) };
@@ -2447,9 +2931,33 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 2, colg + 0 + 1 , -pOverVar*yfnhat(2,1) };
 									tripletIndex++;
+									*/
 									// y_f,n hat * y_g,m hat 
-									auto yfngmhat = yfnhat*ygmhat;
-									//A.block<3, 3>(rowg, colg + 3) = pOverVar*yfnhat*ygmhat;
+									const auto yfngmhat = yfnhat*ygmhat;
+									A_.block<3, 3>(row_ + 3, colg + 3) += pOverVar*yfngmhat;
+									/*
+									A.coeffRef(row + 3 + 0, colf + 3 + 0) += pOverVar*yfngmhat(0,0);
+									A.coeffRef(row + 3 + 0, colf + 3 + 1) += pOverVar*yfngmhat(0,1);
+									A.coeffRef(row + 3 + 0, colf + 3 + 2) += pOverVar*yfngmhat(0,2);
+									A.coeffRef(row + 3 + 1, colf + 3 + 0) += pOverVar*yfngmhat(1,0);
+									A.coeffRef(row + 3 + 1, colf + 3 + 1) += pOverVar*yfngmhat(1,1);
+									A.coeffRef(row + 3 + 1, colf + 3 + 2) += pOverVar*yfngmhat(1,2);
+									A.coeffRef(row + 3 + 2, colf + 3 + 0) += pOverVar*yfngmhat(2,0);
+									A.coeffRef(row + 3 + 2, colf + 3 + 1) += pOverVar*yfngmhat(2,1);
+									A.coeffRef(row + 3 + 2, colf + 3 + 2) += pOverVar*yfngmhat(2,2);
+									*/
+									/*
+									triplets.push_back({ row + 3 + 0, colf + 3 + 0, pOverVar*yfngmhat(0,0) });
+									triplets.push_back({ row + 3 + 0, colf + 3 + 1, pOverVar*yfngmhat(0,1) });
+									triplets.push_back({ row + 3 + 0, colf + 3 + 2, pOverVar*yfngmhat(0,2) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 0, pOverVar*yfngmhat(1,0) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 1, pOverVar*yfngmhat(1,1) });
+									triplets.push_back({ row + 3 + 1, colf + 3 + 2, pOverVar*yfngmhat(1,2) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 0, pOverVar*yfngmhat(2,0) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 1, pOverVar*yfngmhat(2,1) });
+									triplets.push_back({ row + 3 + 2, colf + 3 + 2, pOverVar*yfngmhat(2,2) });
+									*/
+									/*
 									triplets[tripletIndex] = { rowg + 0, colg + 3 + 0 , pOverVar*yfngmhat(0,0) };
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 0, colg + 3 + 1 , pOverVar*yfngmhat(0,1) };
@@ -2468,18 +2976,110 @@ public:
 									tripletIndex++;
 									triplets[tripletIndex] = { rowg + 2, colg + 3 + 2 , pOverVar*yfngmhat(2,2) };
 									tripletIndex++;
-
+									*/
 									// fill b
-									b(rowf + 0) = pOverVar*(ygm.x - yfn.x);
-									b(rowf + 1) = pOverVar*(ygm.y - yfn.y);
-									b(rowf + 2) = pOverVar*(ygm.z - yfn.z);
+									b(row + 0) = pOverVar*(ygm.x - yfn.x);
+									b(row + 1) = pOverVar*(ygm.y - yfn.y);
+									b(row + 2) = pOverVar*(ygm.z - yfn.z);
 
-									b(rowg + 0) = pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
-									b(rowg + 1) = pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
-									b(rowg + 2) = pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
+									b(row + 3 + 0) = pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
+									b(row + 3 + 1) = pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
+									b(row + 3 + 2) = pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
 								}
 							}
+							/*
+							for (int j = 0; j < A_.rows(); j++)
+							{
+								for (int i = 0; i < A_.cols(); i++)
+								{
+									if(A_(i,j) != 0)
+									{
+										const int row = 4 * (6*cloudOffsets[f] + j) + 6*neighbourIndex;
+										triplets.push_back({ row + 0, i + 0, A_(j + 0, i + 0) });
+									}
+								}
+							}
+							*/
+							/*
+							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
+							{
+								//const int row = 6 * (cloudOffsets[f] + n);
+								//const int row_ = 6 * n;
+
+								const int row = 6 * (4 * (cloudOffsets[f] + n) + neighbourIndex);
+								const int row_ = 6 * (4 * n + neighbourIndex);
+
+								const int colf = 6 * (labelOffsets[f]+0);
+								const int colg = 6 * (labelOffsets[g]+0);
+
+								triplets.push_back({ row + 0, colf + 0, A_(row_ + 0, colf + 0) });
+								triplets.push_back({ row + 1, colf + 1, A_(row_ + 1, colf + 1) });
+								triplets.push_back({ row + 2, colf + 2, A_(row_ + 2, colf + 2) });
+								// -y_f,n hat
+								triplets.push_back({ row + 0, colf + 3 + 1, A_(row_ + 0, colf + 3 + 1) });
+								triplets.push_back({ row + 0, colf + 3 + 2, A_(row_ + 0, colf + 3 + 2) });
+								triplets.push_back({ row + 1, colf + 3 + 0, A_(row_ + 1, colf + 3 + 0) });
+								triplets.push_back({ row + 1, colf + 3 + 2, A_(row_ + 1, colf + 3 + 2) });
+								triplets.push_back({ row + 2, colf + 3 + 0, A_(row_ + 2, colf + 3 + 0) });
+								triplets.push_back({ row + 2, colf + 3 + 1, A_(row_ + 2, colf + 3 + 1) });
+								// -I3 
+								triplets.push_back({ row + 0, colg + 0, A_(row_ + 0, colg + 0) });
+								triplets.push_back({ row + 1, colg + 1, A_(row_ + 1, colg + 1) });
+								triplets.push_back({ row + 2, colg + 2, A_(row_ + 2, colg + 2) });
+								// y_g,m hat
+								triplets.push_back({ row + 0, colg + 3 + 1, A_(row_ + 0, colg + 3 + 1) });
+								triplets.push_back({ row + 0, colg + 3 + 2, A_(row_ + 0, colg + 3 + 2) });
+								triplets.push_back({ row + 1, colg + 3 + 0, A_(row_ + 1, colg + 3 + 0) });
+								triplets.push_back({ row + 1, colg + 3 + 2, A_(row_ + 1, colg + 3 + 2) });
+								triplets.push_back({ row + 2, colg + 3 + 0, A_(row_ + 2, colg + 3 + 0) });
+								triplets.push_back({ row + 2, colg + 3 + 1, A_(row_ + 2, colg + 3 + 1) });
+								// next row
+								// y_f,n hat
+								triplets.push_back({ row + 3 + 0, colf + 3 + 1, A_(row_ + 3 + 0, colf + 3 + 1) });
+								triplets.push_back({ row + 3 + 0, colf + 3 + 2, A_(row_ + 3 + 0, colf + 3 + 2) });
+								triplets.push_back({ row + 3 + 1, colf + 3 + 0, A_(row_ + 3 + 1, colf + 3 + 0) });
+								triplets.push_back({ row + 3 + 1, colf + 3 + 2, A_(row_ + 3 + 1, colf + 3 + 2) });
+								triplets.push_back({ row + 3 + 2, colf + 3 + 0, A_(row_ + 3 + 2, colf + 3 + 0) });
+								triplets.push_back({ row + 3 + 2, colf + 3 + 1, A_(row_ + 3 + 2, colf + 3 + 1) });
+								// -y_f,n hat * y_f,n hat 
+								triplets.push_back({ row + 3 + 0, colf + 3 + 0, A_(row_ + 3 + 0, colf + 3 + 0) });
+								triplets.push_back({ row + 3 + 0, colf + 3 + 1, A_(row_ + 3 + 0, colf + 3 + 1) });
+								triplets.push_back({ row + 3 + 0, colf + 3 + 2, A_(row_ + 3 + 0, colf + 3 + 2) });
+								triplets.push_back({ row + 3 + 1, colf + 3 + 0, A_(row_ + 3 + 1, colf + 3 + 0) });
+								triplets.push_back({ row + 3 + 1, colf + 3 + 1, A_(row_ + 3 + 1, colf + 3 + 1) });
+								triplets.push_back({ row + 3 + 1, colf + 3 + 2, A_(row_ + 3 + 1, colf + 3 + 2) });
+								triplets.push_back({ row + 3 + 2, colf + 3 + 0, A_(row_ + 3 + 2, colf + 3 + 0) });
+								triplets.push_back({ row + 3 + 2, colf + 3 + 1, A_(row_ + 3 + 2, colf + 3 + 1) });
+								triplets.push_back({ row + 3 + 2, colf + 3 + 2, A_(row_ + 3 + 2, colf + 3 + 2) });
+								// -y_f,n hat
+								triplets.push_back({ row + 3 + 0, colg + 3 + 1, A_(row_ + 3 + 0, colg + 3 + 1) });
+								triplets.push_back({ row + 3 + 0, colg + 3 + 2, A_(row_ + 3 + 0, colg + 3 + 2) });
+								triplets.push_back({ row + 3 + 1, colg + 3 + 0, A_(row_ + 3 + 1, colg + 3 + 0) });
+								triplets.push_back({ row + 3 + 1, colg + 3 + 2, A_(row_ + 3 + 1, colg + 3 + 2) });
+								triplets.push_back({ row + 3 + 2, colg + 3 + 0, A_(row_ + 3 + 2, colg + 3 + 0) });
+								triplets.push_back({ row + 3 + 2, colg + 3 + 1, A_(row_ + 3 + 2, colg + 3 + 1) });
+								// y_f,n hat * y_g,m hat 
+								triplets.push_back({ row + 3 + 0, colg + 3 + 0, A_(row_ + 3 + 0, colg + 3 + 0) });
+								triplets.push_back({ row + 3 + 0, colg + 3 + 1, A_(row_ + 3 + 0, colg + 3 + 1) });
+								triplets.push_back({ row + 3 + 0, colg + 3 + 2, A_(row_ + 3 + 0, colg + 3 + 2) });
+								triplets.push_back({ row + 3 + 1, colg + 3 + 0, A_(row_ + 3 + 1, colg + 3 + 0) });
+								triplets.push_back({ row + 3 + 1, colg + 3 + 1, A_(row_ + 3 + 1, colg + 3 + 1) });
+								triplets.push_back({ row + 3 + 1, colg + 3 + 2, A_(row_ + 3 + 1, colg + 3 + 2) });
+								triplets.push_back({ row + 3 + 2, colg + 3 + 0, A_(row_ + 3 + 2, colg + 3 + 0) });
+								triplets.push_back({ row + 3 + 2, colg + 3 + 1, A_(row_ + 3 + 2, colg + 3 + 1) });
+								triplets.push_back({ row + 3 + 2, colg + 3 + 2, A_(row_ + 3 + 2, colg + 3 + 2) });
+							}
+							*/
+							neighbourIndex++;
 						}
+					}
+
+
+					#pragma omp critical
+					{
+						//A.setFromTriplets(triplets.begin(), triplets.end());
+						alltriplets.insert(alltriplets.end(), triplets.begin(), triplets.end());
+						//energy += local_energy;
 					}
 
 					int jointIndex = 0;
@@ -2487,7 +3087,7 @@ public:
 					{
 						for (auto const &ent2 : ent1.second)
 						{
-							const int row = 6 * (20*totalNumPoints + (jointOffsets[f] + jointIndex));
+							const int row = 6 * (4*totalNumPoints + (jointOffsets[f] + jointIndex));
 							const int cola = 6 * (labelOffsets[f] + ent1.first);
 							const int colb = 6 * (labelOffsets[f] + ent2.first);
 
@@ -2496,125 +3096,140 @@ public:
 							jointCentroid.get(yfab);
 							auto yfabhat = hat(yfab);
 
-							int tripletIndex = 48 * (Nnear*totalNumPoints + (jointOffsets[f] + jointIndex));
+							int tripletIndex = 48 * (4*totalNumPoints + (jointOffsets[f] + jointIndex));
 
 							// fill A
 							// I3
-							//A.block<3, 3>(rowf, colf) = pOverVar*Eigen::Matrix3d::Identity();
-							triplets[tripletIndex] = { row + 0, cola + 0 , 2*alpha };
+							A_.block<3, 3>(row, cola) = 2 * alpha*Eigen::Matrix3d::Identity();
+							/*
+							triplets[tripletIndex] = { row + 0, cola + 0 , 2 * alpha };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 1, cola + 1 , 2*alpha };
+							triplets[tripletIndex] = { row + 1, cola + 1 , 2 * alpha };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 2, cola + 2 , 2*alpha };
+							triplets[tripletIndex] = { row + 2, cola + 2 , 2 * alpha };
 							tripletIndex++;
+							*/
 							// -y_f,n hat
-							//A.block<3, 3>(rowf, cola + 3) = -2*alpha*yfnhat;
-							triplets[tripletIndex] = { row + 0, cola + 3 + 1 , -2*alpha*yfabhat(0,1) };
+							A_.block<3, 3>(row, cola + 3) = -2*alpha*yfabhat;
+							/*
+							triplets[tripletIndex] = { row + 0, cola + 3 + 1 , -2 * alpha*yfabhat(0,1) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 0, cola + 3 + 2 , -2*alpha*yfabhat(0,2) };
+							triplets[tripletIndex] = { row + 0, cola + 3 + 2 , -2 * alpha*yfabhat(0,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 1, cola + 3 + 0 , -2*alpha*yfabhat(1,0) };
+							triplets[tripletIndex] = { row + 1, cola + 3 + 0 , -2 * alpha*yfabhat(1,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 1, cola + 3 + 2 , -2*alpha*yfabhat(1,2) };
+							triplets[tripletIndex] = { row + 1, cola + 3 + 2 , -2 * alpha*yfabhat(1,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 2, cola + 3 + 0 , -2*alpha*yfabhat(2,0) };
+							triplets[tripletIndex] = { row + 2, cola + 3 + 0 , -2 * alpha*yfabhat(2,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 2, cola + 3 + 1 , -2*alpha*yfabhat(2,1) };
+							triplets[tripletIndex] = { row + 2, cola + 3 + 1 , -2 * alpha*yfabhat(2,1) };
 							tripletIndex++;
+							*/
 							// -I3 
-							//A.block<3, 3>(rowf, colb) = -2*alpha*Eigen::Matrix3d::Identity();
-							triplets[tripletIndex] = { row + 0, colb + 0 , -2*alpha };
+							A_.block<3, 3>(row, colb) = -2*alpha*Eigen::Matrix3d::Identity();
+							/*
+							triplets[tripletIndex] = { row + 0, colb + 0 , -2 * alpha };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 1, colb + 1 , -2*alpha };
+							triplets[tripletIndex] = { row + 1, colb + 1 , -2 * alpha };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 2, colb + 2 , -2*alpha };
+							triplets[tripletIndex] = { row + 2, colb + 2 , -2 * alpha };
 							tripletIndex++;
+							*/
 							// y_g,m hat
-							//A.block<3, 3>(rowf, colb + 3) = 2*alpha*ygmhat;
-							triplets[tripletIndex] = { row + 0, colb + 3 + 1 , 2*alpha*yfabhat(0,1) };
+							A_.block<3, 3>(row, colb + 3) = 2*alpha*yfabhat;
+							/*
+							triplets[tripletIndex] = { row + 0, colb + 3 + 1 , 2 * alpha*yfabhat(0,1) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 0, colb + 3 + 2 , 2*alpha*yfabhat(0,2) };
+							triplets[tripletIndex] = { row + 0, colb + 3 + 2 , 2 * alpha*yfabhat(0,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 1, colb + 3 + 0 , 2*alpha*yfabhat(1,0) };
+							triplets[tripletIndex] = { row + 1, colb + 3 + 0 , 2 * alpha*yfabhat(1,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 1, colb + 3 + 2 , 2*alpha*yfabhat(1,2) };
+							triplets[tripletIndex] = { row + 1, colb + 3 + 2 , 2 * alpha*yfabhat(1,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 2, colb + 3 + 0 , 2*alpha*yfabhat(2,0) };
+							triplets[tripletIndex] = { row + 2, colb + 3 + 0 , 2 * alpha*yfabhat(2,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 2, colb + 3 + 1 , 2*alpha*yfabhat(2,1) };
+							triplets[tripletIndex] = { row + 2, colb + 3 + 1 , 2 * alpha*yfabhat(2,1) };
 							tripletIndex++;
+							*/
 							// next row
 
 							// y_f,n hat
-							//A.block<3, 3>(rowg, cola) = 2*alpha*yfnhat;
-							triplets[tripletIndex] = { row + 3 + 0, cola + 0 + 1 , 2*alpha*yfabhat(0,1) };
+							A_.block<3, 3>(row + 3, cola) = 2*alpha*yfabhat;
+							/*
+							triplets[tripletIndex] = { row + 3 + 0, cola + 0 + 1 , 2 * alpha*yfabhat(0,1) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 0, cola + 0 + 2 , 2*alpha*yfabhat(0,2) };
+							triplets[tripletIndex] = { row + 3 + 0, cola + 0 + 2 , 2 * alpha*yfabhat(0,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 1, cola + 0 + 0 , 2*alpha*yfabhat(1,0) };
+							triplets[tripletIndex] = { row + 3 + 1, cola + 0 + 0 , 2 * alpha*yfabhat(1,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 1, cola + 0 + 2 , 2*alpha*yfabhat(1,2) };
+							triplets[tripletIndex] = { row + 3 + 1, cola + 0 + 2 , 2 * alpha*yfabhat(1,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 2, cola + 0 + 0 , 2*alpha*yfabhat(2,0) };
+							triplets[tripletIndex] = { row + 3 + 2, cola + 0 + 0 , 2 * alpha*yfabhat(2,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 2, cola + 0 + 1 , 2*alpha*yfabhat(2,1) };
+							triplets[tripletIndex] = { row + 3 + 2, cola + 0 + 1 , 2 * alpha*yfabhat(2,1) };
 							tripletIndex++;
+							*/
 							// -y_f,n hat * y_f,n hat 
 							auto yfabhat2 = yfabhat*yfabhat;
-							//A.block<3, 3>(rowg, cola + 3) = -2*alpha*;
-							triplets[tripletIndex] = { row + 3 + 0, cola + 3 + 0 , -2*alpha*yfabhat2(0,0) };
+							A_.block<3, 3>(row + 3, cola + 3) = -2*alpha*yfabhat2;
+							/*
+							triplets[tripletIndex] = { row + 3 + 0, cola + 3 + 0 , -2 * alpha*yfabhat2(0,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 0, cola + 3 + 1 , -2*alpha*yfabhat2(0,1) };
+							triplets[tripletIndex] = { row + 3 + 0, cola + 3 + 1 , -2 * alpha*yfabhat2(0,1) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 0, cola + 3 + 2 , -2*alpha*yfabhat2(0,2) };
+							triplets[tripletIndex] = { row + 3 + 0, cola + 3 + 2 , -2 * alpha*yfabhat2(0,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 1, cola + 3 + 0 , -2*alpha*yfabhat2(1,0) };
+							triplets[tripletIndex] = { row + 3 + 1, cola + 3 + 0 , -2 * alpha*yfabhat2(1,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 1, cola + 3 + 1 , -2*alpha*yfabhat2(1,1) };
+							triplets[tripletIndex] = { row + 3 + 1, cola + 3 + 1 , -2 * alpha*yfabhat2(1,1) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 1, cola + 3 + 2 , -2*alpha*yfabhat2(1,2) };
+							triplets[tripletIndex] = { row + 3 + 1, cola + 3 + 2 , -2 * alpha*yfabhat2(1,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 2, cola + 3 + 0 , -2*alpha*yfabhat2(2,0) };
+							triplets[tripletIndex] = { row + 3 + 2, cola + 3 + 0 , -2 * alpha*yfabhat2(2,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 2, cola + 3 + 1 , -2*alpha*yfabhat2(2,1) };
+							triplets[tripletIndex] = { row + 3 + 2, cola + 3 + 1 , -2 * alpha*yfabhat2(2,1) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 2, cola + 3 + 2 , -2*alpha*yfabhat2(2,2) };
+							triplets[tripletIndex] = { row + 3 + 2, cola + 3 + 2 , -2 * alpha*yfabhat2(2,2) };
 							tripletIndex++;
+							*/
 							// -y_f,n hat
-							//A.block<3, 3>(row + 3, colb) = -2*alpha*yfnhat;
-							triplets[tripletIndex] = { row + 3 + 0, colb + 0 + 1 , -2*alpha*yfabhat(0,1) };
+							A_.block<3, 3>(row + 3, colb) = -2*alpha*yfabhat;
+							/*
+							triplets[tripletIndex] = { row + 3 + 0, colb + 0 + 1 , -2 * alpha*yfabhat(0,1) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 0, colb + 0 + 2 , -2*alpha*yfabhat(0,2) };
+							triplets[tripletIndex] = { row + 3 + 0, colb + 0 + 2 , -2 * alpha*yfabhat(0,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 1, colb + 0 + 0 , -2*alpha*yfabhat(1,0) };
+							triplets[tripletIndex] = { row + 3 + 1, colb + 0 + 0 , -2 * alpha*yfabhat(1,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 1, colb + 0 + 2 , -2*alpha*yfabhat(1,2) };
+							triplets[tripletIndex] = { row + 3 + 1, colb + 0 + 2 , -2 * alpha*yfabhat(1,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 2, colb + 0 + 0 , -2*alpha*yfabhat(2,0) };
+							triplets[tripletIndex] = { row + 3 + 2, colb + 0 + 0 , -2 * alpha*yfabhat(2,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 2, colb + 0 + 1 , -2*alpha*yfabhat(2,1) };
+							triplets[tripletIndex] = { row + 3 + 2, colb + 0 + 1 , -2 * alpha*yfabhat(2,1) };
 							tripletIndex++;
+							*/
 							// y_f,n hat * y_g,m hat 
-							//A.block<3, 3>(row + 3, colb + 3) = 2*alpha*yfnhat*ygmhat;
-							triplets[tripletIndex] = { row + 3 + 0, colb + 3 + 0 , 2*alpha*yfabhat2(0,0) };
+							A_.block<3, 3>(row + 3, colb + 3) = 2*alpha*yfabhat2;
+							/*
+							triplets[tripletIndex] = { row + 3 + 0, colb + 3 + 0 , 2 * alpha*yfabhat2(0,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 0, colb + 3 + 1 , 2*alpha*yfabhat2(0,1) };
+							triplets[tripletIndex] = { row + 3 + 0, colb + 3 + 1 , 2 * alpha*yfabhat2(0,1) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 0, colb + 3 + 2 , 2*alpha*yfabhat2(0,2) };
+							triplets[tripletIndex] = { row + 3 + 0, colb + 3 + 2 , 2 * alpha*yfabhat2(0,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 1, colb + 3 + 0 , 2*alpha*yfabhat2(1,0) };
+							triplets[tripletIndex] = { row + 3 + 1, colb + 3 + 0 , 2 * alpha*yfabhat2(1,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 1, colb + 3 + 1 , 2*alpha*yfabhat2(1,1) };
+							triplets[tripletIndex] = { row + 3 + 1, colb + 3 + 1 , 2 * alpha*yfabhat2(1,1) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 1, colb + 3 + 2 , 2*alpha*yfabhat2(1,2) };
+							triplets[tripletIndex] = { row + 3 + 1, colb + 3 + 2 , 2 * alpha*yfabhat2(1,2) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 2, colb + 3 + 0 , 2*alpha*yfabhat2(2,0) };
+							triplets[tripletIndex] = { row + 3 + 2, colb + 3 + 0 , 2 * alpha*yfabhat2(2,0) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 2, colb + 3 + 1 , 2*alpha*yfabhat2(2,1) };
+							triplets[tripletIndex] = { row + 3 + 2, colb + 3 + 1 , 2 * alpha*yfabhat2(2,1) };
 							tripletIndex++;
-							triplets[tripletIndex] = { row + 3 + 2, colb + 3 + 2 , 2*alpha*yfabhat2(2,2) };
+							triplets[tripletIndex] = { row + 3 + 2, colb + 3 + 2 , 2 * alpha*yfabhat2(2,2) };
 							tripletIndex++;
-
+							*/
 							// fill b
 							b(row + 0) += 0;
 							b(row + 1) += 0;
@@ -2628,7 +3243,7 @@ public:
 						}
 					}
 				}
-				A.setFromTriplets(triplets.begin(), triplets.end());
+				A.setFromTriplets(alltriplets.begin(), alltriplets.end());
 				/*
 				#pragma omp parallel for
 				for (int f = 0; f < labeledPointClouds.size(); f++)
@@ -2746,6 +3361,21 @@ public:
 				// solve equation system Ax=b to find rotation and translation deltas
 				const auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
 				//const Eigen::VectorXd delta = A.fullPivHouseholderQr().solve(b);
+				
+				Eigen::SPQR<Eigen::SparseMatrix<double>> solver(A_.sparseView());
+				if (solver.info() != Eigen::ComputationInfo::Success)
+				{
+					LOG_S(WARNING) << "Shit hits the fan. (1)";
+					break;
+				}
+				Eigen::VectorXd delta = solver.solve(b);
+				if (solver.info() != Eigen::ComputationInfo::Success)
+				{
+					LOG_S(WARNING) << "Shit hits the fan. (2)";
+					break;
+				}
+
+				/*
 				Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> solver(A);
 				if (solver.info() != Eigen::ComputationInfo::Success)
 				{
@@ -2758,17 +3388,12 @@ public:
 					LOG_S(WARNING) << "Shit hits the fan." << solver.info();
 					break;
 				}
+				*/
 				const auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
 				const auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
-
 				error = delta.squaredNorm();
-				//if (!(A*delta).isApprox(b))
-				//{
-				//	LOG_S(WARNING) << "Shit hits the fan." << delta;
-				//	break;
-				//}
 
-				for (int f = 0;f < labeledPointClouds.size();f++)
+				for (int f = 0;f < labeledPointCloudsTransformed.size();f++)
 				{
 					for (int label = 0; label < labeledPoints[f].size(); label++)
 					{
@@ -2779,13 +3404,10 @@ public:
 						Eigen::Vector3d m(delta(transOffset), delta(transOffset + 1), delta(transOffset + 2));
 						double phi = l.norm();
 						Eigen::Affine3d trafo = Eigen::Affine3d::Identity();
-						if (phi > DBL_EPSILON || phi < -DBL_EPSILON)
+						if (phi > 0.001 || phi < -0.001)
 						{
 							double phi2 = phi*phi;
-							Eigen::Matrix3d lhat;
-							lhat << 0, -l(2), l(1),
-								l(2), 0, -l(0),
-								-l(1), l(0), 0;
+							auto lhat = hat(l);
 							auto lhat2 = lhat*lhat;
 							auto R = Eigen::Matrix3d::Identity() + lhat*sin(phi) / phi + lhat2*(1 - cos(phi)) / phi2;
 							trafo(0, 0) = R(0, 0);trafo(0, 1) = R(0, 1);trafo(0, 2) = R(0, 2);
@@ -3073,6 +3695,8 @@ int _main_(int _argc, char** _argv)
 {
 	const char* const appTitle = "Human Body Reconstruction";
 
+	Eigen::initParallel();
+
 	Args args(_argc, _argv);
 
 	//setup logging
@@ -3126,7 +3750,7 @@ int _main_(int _argc, char** _argv)
 		cv::ocl::Device(context.device(0)); //Here is where you change which GPU to use (e.g. 0 or 1)
 		KinectDataProvider KDP;
 
-		bool runningCapture = false;
+		//bool runningCapture = false;
 		bool captureChunk = false;
 		int numCapturedFrames = 0;
 		ReconstructionState reconstruction(7, 16);
@@ -3141,6 +3765,10 @@ int _main_(int _argc, char** _argv)
 
 		float bodyAngle = 0.;
 		int lastTrackedBody = -1;
+
+		int benchmarkSampleCount = 2;
+		float benchmarkStepSize = 0.01;
+		float leafsize = 0.01;
 
 		RenderImage xPlane(triplanarWidth, triplanarHeight),
 			yPlane(triplanarWidth, triplanarHeight),
@@ -3415,7 +4043,7 @@ int _main_(int _argc, char** _argv)
 					ImGui::BeginGroup();
 						if (ImGui::Button("Downsample point clouds"))
 						{
-							reconstruction.downsamplePointClouds();
+							reconstruction.downsamplePointClouds(leafsize);
 						}
 					ImGui::EndGroup();
 					ImGui::BeginGroup();
@@ -3433,7 +4061,16 @@ int _main_(int _argc, char** _argv)
 						ImGui::SameLine();
 						ImGui::Value("Target angle", reconstruction.targetAngle());
 					ImGui::EndGroup();
-					ImGui::ProgressBar(0.);
+					//ImGui::ProgressBar(0.);
+					ImGui::BeginGroup();
+						ImGui::SliderInt("Nnear", &Nnear, 1, 100);
+						ImGui::SliderFloat("alpha", &alphaEq, 0.01, 10.0);
+						ImGui::SliderInt("Max rigid steps", &maxIterRigid, 0, 100);
+						ImGui::SliderInt("Max non rigid steps", &maxIterNonRigid, 0, 100);
+						ImGui::SliderInt("Benchmark sample count", &benchmarkSampleCount, 2, 100);
+						ImGui::SliderFloat("Benchmark sample", &benchmarkStepSize, 0.0001, 1);
+						ImGui::SliderFloat("Leafsize", &leafsize, 0.001, 0.1);
+					ImGui::EndGroup();
 					ImGui::BeginGroup();
 						/*if (ImGui::Button("Start capture"))
 						{
@@ -3485,7 +4122,7 @@ int _main_(int _argc, char** _argv)
 						ImGui::SameLine();
 						if (ImGui::Button("Create Benchmark"))
 						{
-							reconstruction.createBenchmarkProblem();
+							reconstruction.createBenchmarkProblem(benchmarkSampleCount, benchmarkStepSize);
 						}
 					ImGui::EndGroup();
 				ImGui::End();
