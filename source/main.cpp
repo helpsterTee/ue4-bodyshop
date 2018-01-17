@@ -427,6 +427,8 @@ float alphaEq = 0.8;
 int maxIterRigid = 5;
 int maxIterNonRigid = 5;
 
+typedef pcl::CentroidPoint<pcl::PointXYZ> CentroidXYZ;
+
 std::string to_string_extended(int number, int width=5)
 {
 	std::stringstream numberString;
@@ -1779,6 +1781,7 @@ public:
 		
 		// ----------- rigid registration -------------
 		std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
+		if(maxIterRigid > 0)
 		{
 			int totalNumPoints = 0;
 			std::vector<int> cloudOffsets(mPointClouds.size());
@@ -1835,9 +1838,13 @@ public:
 				//Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * totalNumPoints, 6 * labeledPointClouds.size());
 				//Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(4*6 * totalNumPoints, 6 * labeledPointClouds.size());
 
-				Eigen::SparseMatrix<double> A(4 * 6 * totalNumPoints, 6 * labeledPointClouds.size());
-				A.reserve(4 * 6 * totalNumPoints * 48);
-				Eigen::VectorXd b = Eigen::VectorXd::Zero(4 * 6 * totalNumPoints);
+				//Eigen::SparseMatrix<double> A(4 * 6 * totalNumPoints, 6 * labeledPointClouds.size());
+				//A.reserve(4 * 6 * totalNumPoints * 48);
+				//Eigen::VectorXd b = Eigen::VectorXd::Zero(4 * 6 * totalNumPoints);
+
+				Eigen::SparseMatrix<double> A(2 * 6 * totalNumPoints, 6 * labeledPointClouds.size());
+				//A.reserve(2 * totalNumPoints * 48);
+				Eigen::VectorXd b = Eigen::VectorXd::Zero(2 * 6 * totalNumPoints);
 
 				//Eigen::SparseMatrix<double> A(6 * totalNumPoints, 6 * labeledPointClouds.size());
 				//A.reserve(6 * totalNumPoints * 48);
@@ -1846,7 +1853,8 @@ public:
 				double energy = 0.0;
 				
 				std::vector<Eigen::Triplet<double>> alltriplets;
-				alltriplets.reserve(4*labeledPointClouds.size()*totalNumPoints* 48);
+				//alltriplets.reserve(4*labeledPointClouds.size()*totalNumPoints* 48);
+				alltriplets.reserve(2*totalNumPoints* 48);
 				//alltriplets.reserve(labeledPointClouds.size()*totalNumPoints* 48);
 
 				#pragma omp parallel for
@@ -1860,14 +1868,17 @@ public:
 					std::vector<Eigen::Triplet<double>> triplets;
 					triplets.reserve(totalNumPoints*48);
 
-					Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(4 * 6 * labeledPointClouds[f]->size(), 6 * labeledPointClouds.size());
+					//Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(4 * 6 * labeledPointClouds[f]->size(), 6 * 2);
 					//Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(6 * labeledPointClouds[f]->size(), 6 * labeledPointClouds.size());
 
-					const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
+					//const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
+					const std::array<int, 2> neighbouringFrames = { (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size() };
 					for(const auto g : neighbouringFrames )
 					{
 						if(g != f)
 						{
+							Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(6 * labeledPointClouds[f]->size(), 6 * 2);
+							
 							std::vector<int> pointIdxNKNSearch(Nnear);
 							std::vector<float> pointNKNSquaredDistance(Nnear);
 							
@@ -1893,14 +1904,17 @@ public:
 									
 									//const int row = 6 * ((labeledPointClouds.size()-1)*(cloudOffsets[f] + n) + neighbourIndex);
 
-									const int row = 6 * (4 * (cloudOffsets[f] + n) + neighbourIndex); // <-
-									const int row_ = 6 * (4 * n + neighbourIndex);
+									const int row = 6 * (2 * (cloudOffsets[f] + n) + neighbourIndex); // <-
+									//const int row_ = 6 * (4 * n + neighbourIndex);
+									const int row_ = 6 * n;
 
 									//const int row = 6*(cloudOffsets[f] + n);
 									//const int row_ = 6 * n ;
 
-									const int colf = 6 * f;
-									const int colg = 6 * g;
+									//const int colf = 6 * f;
+									//const int colg = 6 * g;
+									const int colf = 0;
+									const int colg = 6;
 
 									const Eigen::Matrix3d yfnhat = hat(yfn);
 									const Eigen::Matrix3d ygmhat = hat(ygm);
@@ -2181,71 +2195,71 @@ public:
 
 							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
 							{
-								//const int row = 6 * (cloudOffsets[f] + n);
-								//const int row_ = 6 * n;
+								const int row = 6 * (2 * (cloudOffsets[f] + n) + neighbourIndex);
+								//const int row_ = 6 * (4 * n + neighbourIndex);
+								const int row_ = 6 * n;
 
-								const int row = 6 * (4 * (cloudOffsets[f] + n) + neighbourIndex);
-								const int row_ = 6 * (4 * n + neighbourIndex);
-								
 								const int colf = 6 * f;
 								const int colg = 6 * g;
+								const int colf_ = 0;
+								const int colg_ = 6;
 
-								triplets.push_back({row + 0, colf + 0, A_(row_ + 0, colf + 0)});
-								triplets.push_back({row + 1, colf + 1, A_(row_ + 1, colf + 1)});
-								triplets.push_back({row + 2, colf + 2, A_(row_ + 2, colf + 2)});
+								triplets.push_back({row + 0, colf + 0, A_(row_ + 0, colf_ + 0)});
+								triplets.push_back({row + 1, colf + 1, A_(row_ + 1, colf_ + 1)});
+								triplets.push_back({row + 2, colf + 2, A_(row_ + 2, colf_ + 2)});
 								// -y_f,n hat
-								triplets.push_back({row + 0, colf + 3 + 1, A_(row_ + 0, colf + 3 + 1)});
-								triplets.push_back({row + 0, colf + 3 + 2, A_(row_ + 0, colf + 3 + 2)});
-								triplets.push_back({row + 1, colf + 3 + 0, A_(row_ + 1, colf + 3 + 0)});
-								triplets.push_back({row + 1, colf + 3 + 2, A_(row_ + 1, colf + 3 + 2)});
-								triplets.push_back({row + 2, colf + 3 + 0, A_(row_ + 2, colf + 3 + 0)});
-								triplets.push_back({row + 2, colf + 3 + 1, A_(row_ + 2, colf + 3 + 1)});
+								triplets.push_back({row + 0, colf + 3 + 1, A_(row_ + 0, colf_ + 3 + 1)});
+								triplets.push_back({row + 0, colf + 3 + 2, A_(row_ + 0, colf_ + 3 + 2)});
+								triplets.push_back({row + 1, colf + 3 + 0, A_(row_ + 1, colf_ + 3 + 0)});
+								triplets.push_back({row + 1, colf + 3 + 2, A_(row_ + 1, colf_ + 3 + 2)});
+								triplets.push_back({row + 2, colf + 3 + 0, A_(row_ + 2, colf_ + 3 + 0)});
+								triplets.push_back({row + 2, colf + 3 + 1, A_(row_ + 2, colf_ + 3 + 1)});
 								// -I3 
-								triplets.push_back({row + 0, colg + 0, A_(row_ + 0, colg + 0)});
-								triplets.push_back({row + 1, colg + 1, A_(row_ + 1, colg + 1)});
-								triplets.push_back({row + 2, colg + 2, A_(row_ + 2, colg + 2)});
+								triplets.push_back({row + 0, colg + 0, A_(row_ + 0, colg_ + 0)});
+								triplets.push_back({row + 1, colg + 1, A_(row_ + 1, colg_ + 1)});
+								triplets.push_back({row + 2, colg + 2, A_(row_ + 2, colg_ + 2)});
 								// y_g,m hat
-								triplets.push_back({row + 0, colg + 3 + 1, A_(row_ + 0, colg + 3 + 1)});
-								triplets.push_back({row + 0, colg + 3 + 2, A_(row_ + 0, colg + 3 + 2)});
-								triplets.push_back({row + 1, colg + 3 + 0, A_(row_ + 1, colg + 3 + 0)});
-								triplets.push_back({row + 1, colg + 3 + 2, A_(row_ + 1, colg + 3 + 2)});
-								triplets.push_back({row + 2, colg + 3 + 0, A_(row_ + 2, colg + 3 + 0)});
-								triplets.push_back({row + 2, colg + 3 + 1, A_(row_ + 2, colg + 3 + 1)});
+								triplets.push_back({row + 0, colg + 3 + 1, A_(row_ + 0, colg_ + 3 + 1)});
+								triplets.push_back({row + 0, colg + 3 + 2, A_(row_ + 0, colg_ + 3 + 2)});
+								triplets.push_back({row + 1, colg + 3 + 0, A_(row_ + 1, colg_ + 3 + 0)});
+								triplets.push_back({row + 1, colg + 3 + 2, A_(row_ + 1, colg_ + 3 + 2)});
+								triplets.push_back({row + 2, colg + 3 + 0, A_(row_ + 2, colg_ + 3 + 0)});
+								triplets.push_back({row + 2, colg + 3 + 1, A_(row_ + 2, colg_ + 3 + 1)});
 								// next row
 								// y_f,n hat
-								triplets.push_back({row + 3 + 0, colf + 3 + 1, A_(row_ + 3 + 0, colf + 3 + 1)});
-								triplets.push_back({row + 3 + 0, colf + 3 + 2, A_(row_ + 3 + 0, colf + 3 + 2)});
-								triplets.push_back({row + 3 + 1, colf + 3 + 0, A_(row_ + 3 + 1, colf + 3 + 0)});
-								triplets.push_back({row + 3 + 1, colf + 3 + 2, A_(row_ + 3 + 1, colf + 3 + 2)});
-								triplets.push_back({row + 3 + 2, colf + 3 + 0, A_(row_ + 3 + 2, colf + 3 + 0)});
-								triplets.push_back({row + 3 + 2, colf + 3 + 1, A_(row_ + 3 + 2, colf + 3 + 1)});
+								triplets.push_back({row + 3 + 0, colf + 3 + 1, A_(row_ + 3 + 0, colf_ + 3 + 1)});
+								triplets.push_back({row + 3 + 0, colf + 3 + 2, A_(row_ + 3 + 0, colf_ + 3 + 2)});
+								triplets.push_back({row + 3 + 1, colf + 3 + 0, A_(row_ + 3 + 1, colf_ + 3 + 0)});
+								triplets.push_back({row + 3 + 1, colf + 3 + 2, A_(row_ + 3 + 1, colf_ + 3 + 2)});
+								triplets.push_back({row + 3 + 2, colf + 3 + 0, A_(row_ + 3 + 2, colf_ + 3 + 0)});
+								triplets.push_back({row + 3 + 2, colf + 3 + 1, A_(row_ + 3 + 2, colf_ + 3 + 1)});
 								// -y_f,n hat * y_f,n hat 
-								triplets.push_back({row + 3 + 0, colf + 3 + 0, A_(row_ + 3 + 0, colf + 3 + 0)});
-								triplets.push_back({row + 3 + 0, colf + 3 + 1, A_(row_ + 3 + 0, colf + 3 + 1)});
-								triplets.push_back({row + 3 + 0, colf + 3 + 2, A_(row_ + 3 + 0, colf + 3 + 2)});
-								triplets.push_back({row + 3 + 1, colf + 3 + 0, A_(row_ + 3 + 1, colf + 3 + 0)});
-								triplets.push_back({row + 3 + 1, colf + 3 + 1, A_(row_ + 3 + 1, colf + 3 + 1)});
-								triplets.push_back({row + 3 + 1, colf + 3 + 2, A_(row_ + 3 + 1, colf + 3 + 2)});
-								triplets.push_back({row + 3 + 2, colf + 3 + 0, A_(row_ + 3 + 2, colf + 3 + 0)});
-								triplets.push_back({row + 3 + 2, colf + 3 + 1, A_(row_ + 3 + 2, colf + 3 + 1)});
-								triplets.push_back({row + 3 + 2, colf + 3 + 2, A_(row_ + 3 + 2, colf + 3 + 2)});
+								triplets.push_back({row + 3 + 0, colf + 3 + 0, A_(row_ + 3 + 0, colf_ + 3 + 0)});
+								triplets.push_back({row + 3 + 0, colf + 3 + 1, A_(row_ + 3 + 0, colf_ + 3 + 1)});
+								triplets.push_back({row + 3 + 0, colf + 3 + 2, A_(row_ + 3 + 0, colf_ + 3 + 2)});
+								triplets.push_back({row + 3 + 1, colf + 3 + 0, A_(row_ + 3 + 1, colf_ + 3 + 0)});
+								triplets.push_back({row + 3 + 1, colf + 3 + 1, A_(row_ + 3 + 1, colf_ + 3 + 1)});
+								triplets.push_back({row + 3 + 1, colf + 3 + 2, A_(row_ + 3 + 1, colf_ + 3 + 2)});
+								triplets.push_back({row + 3 + 2, colf + 3 + 0, A_(row_ + 3 + 2, colf_ + 3 + 0)});
+								triplets.push_back({row + 3 + 2, colf + 3 + 1, A_(row_ + 3 + 2, colf_ + 3 + 1)});
+								triplets.push_back({row + 3 + 2, colf + 3 + 2, A_(row_ + 3 + 2, colf_ + 3 + 2)});
 								// -y_f,n hat
-								triplets.push_back({row + 3 + 0, colg + 3 + 1, A_(row_ + 3 + 0, colg + 3 + 1)});
-								triplets.push_back({row + 3 + 0, colg + 3 + 2, A_(row_ + 3 + 0, colg + 3 + 2)});
-								triplets.push_back({row + 3 + 1, colg + 3 + 0, A_(row_ + 3 + 1, colg + 3 + 0)});
-								triplets.push_back({row + 3 + 1, colg + 3 + 2, A_(row_ + 3 + 1, colg + 3 + 2)});
-								triplets.push_back({row + 3 + 2, colg + 3 + 0, A_(row_ + 3 + 2, colg + 3 + 0)});
-								triplets.push_back({row + 3 + 2, colg + 3 + 1, A_(row_ + 3 + 2, colg + 3 + 1)});
+								triplets.push_back({row + 3 + 0, colg + 3 + 1, A_(row_ + 3 + 0, colg_ + 3 + 1)});
+								triplets.push_back({row + 3 + 0, colg + 3 + 2, A_(row_ + 3 + 0, colg_ + 3 + 2)});
+								triplets.push_back({row + 3 + 1, colg + 3 + 0, A_(row_ + 3 + 1, colg_ + 3 + 0)});
+								triplets.push_back({row + 3 + 1, colg + 3 + 2, A_(row_ + 3 + 1, colg_ + 3 + 2)});
+								triplets.push_back({row + 3 + 2, colg + 3 + 0, A_(row_ + 3 + 2, colg_ + 3 + 0)});
+								triplets.push_back({row + 3 + 2, colg + 3 + 1, A_(row_ + 3 + 2, colg_ + 3 + 1)});
 								// y_f,n hat * y_g,m hat 
-								triplets.push_back({row + 3 + 0, colg + 3 + 0, A_(row_ + 3 + 0, colg + 3 + 0)});
-								triplets.push_back({row + 3 + 0, colg + 3 + 1, A_(row_ + 3 + 0, colg + 3 + 1)});
-								triplets.push_back({row + 3 + 0, colg + 3 + 2, A_(row_ + 3 + 0, colg + 3 + 2)});
-								triplets.push_back({row + 3 + 1, colg + 3 + 0, A_(row_ + 3 + 1, colg + 3 + 0)});
-								triplets.push_back({row + 3 + 1, colg + 3 + 1, A_(row_ + 3 + 1, colg + 3 + 1)});
-								triplets.push_back({row + 3 + 1, colg + 3 + 2, A_(row_ + 3 + 1, colg + 3 + 2)});
-								triplets.push_back({row + 3 + 2, colg + 3 + 0, A_(row_ + 3 + 2, colg + 3 + 0)});
-								triplets.push_back({row + 3 + 2, colg + 3 + 1, A_(row_ + 3 + 2, colg + 3 + 1)});
-								triplets.push_back({row + 3 + 2, colg + 3 + 2, A_(row_ + 3 + 2, colg + 3 + 2)});
+								triplets.push_back({row + 3 + 0, colg + 3 + 0, A_(row_ + 3 + 0, colg_ + 3 + 0)});
+								triplets.push_back({row + 3 + 0, colg + 3 + 1, A_(row_ + 3 + 0, colg_ + 3 + 1)});
+								triplets.push_back({row + 3 + 0, colg + 3 + 2, A_(row_ + 3 + 0, colg_ + 3 + 2)});
+								triplets.push_back({row + 3 + 1, colg + 3 + 0, A_(row_ + 3 + 1, colg_ + 3 + 0)});
+								triplets.push_back({row + 3 + 1, colg + 3 + 1, A_(row_ + 3 + 1, colg_ + 3 + 1)});
+								triplets.push_back({row + 3 + 1, colg + 3 + 2, A_(row_ + 3 + 1, colg_ + 3 + 2)});
+								triplets.push_back({row + 3 + 2, colg + 3 + 0, A_(row_ + 3 + 2, colg_ + 3 + 0)});
+								triplets.push_back({row + 3 + 2, colg + 3 + 1, A_(row_ + 3 + 2, colg_ + 3 + 1)});
+								triplets.push_back({row + 3 + 2, colg + 3 + 2, A_(row_ + 3 + 2, colg_ + 3 + 2)});
 							}
 							neighbourIndex++;
 						}
@@ -2258,7 +2272,7 @@ public:
 						energy += local_energy;
 					}
 				}
-				//A.setFromTriplets(triplets.begin(), triplets.end());
+				//A.setFromTriplets(triplets.begin(), triplets.end());n
 				A.setFromTriplets(alltriplets.begin(), alltriplets.end());
 				auto endTimeEQBuild = std::chrono::high_resolution_clock::now();
 				auto EQBuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQBuild - startTimeEQBuild).count();
@@ -2277,24 +2291,8 @@ public:
 					LOG_S(WARNING) << "Shit hits the fan (2)";
 					break;
 				}
-				/*
-				Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> solver(A);
-				if (solver.info() != Eigen::ComputationInfo::Success) 
-				{
-					LOG_S(WARNING) << "Shit hits the fan: " << solver.lastErrorMessage();
-					break;
-				}
-				Eigen::VectorXd delta = solver.solve(b);
-				if (solver.info() != Eigen::ComputationInfo::Success)
-				{
-					LOG_S(WARNING) << "Shit hits the fan: " << solver.lastErrorMessage();
-					break;
-				}
-				*/
-				//Eigen::JacobiSVD<Eigen::MatrixXd, Eigen::FullPivHouseholderQRPreconditioner> solver(A_, Eigen::ComputeFullU | Eigen::ComputeFullV);
-				//Eigen::VectorXd delta = solver.solve(b);
-				//LOG_S(INFO) << "Singular Values:" << solver.singularValues();
 				
+
 				auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
 				auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
 				gradient = delta.squaredNorm();
@@ -2367,7 +2365,7 @@ public:
 						}
 					}
 
-#pragma omp critical
+					#pragma omp critical
 					{
 						energy += energy_f;
 					}
@@ -2544,7 +2542,410 @@ public:
 
 		// non-rigid registration
 		//nonrigidtest(labeledPointClouds, cluster_indices);
+		if(maxIterNonRigid)
+		{
+			int totalNumPoints = 0;
+			std::vector<int> cloudOffsets(mPointClouds.size());
+			for (int i = 0; i<mPointClouds.size(); i++)
+			{
+				cloudOffsets[i] = totalNumPoints;
+				totalNumPoints += mPointClouds[i]->size();
+			}
 
+			const int maxIterations = maxIterNonRigid;
+			const double alpha = alphaEq;
+			constexpr double errorBound = 0.0001;
+
+			//std::vector<pcl::KdTreeFLANN<pcl::PointXYZRGBL >> kdtrees(mPointClouds.size());
+
+			LOG_F(INFO, "Starting non-rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
+			LOG_F(INFO, "%-5s | %-10s | %-10s | %-10s | %-10s | %-10s | %-10s | %-10s", "iter", "gradient", "t kdtree", "t var", "t build", "t solve", "precision", "energy");
+
+			int iteration = 0;
+			double gradient = 1.;
+
+			do
+			{
+				// update closest points
+				auto startTimeKDTree = std::chrono::high_resolution_clock::now();
+				#pragma omp parallel for
+				for (int f = 0; f < kdtrees.size(); f++)
+				{
+					setupLogThreadName();
+					kdtrees[f].setInputCloud(labeledPointClouds[f]);
+				}
+				auto endTimeKDTree = std::chrono::high_resolution_clock::now();
+				auto KDTreeRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeKDTree - startTimeKDTree).count();
+
+				// Reestimate joint locations
+				std::vector< std::map<uint32_t, std::map<uint32_t, CentroidXYZ> > > jointEstimations(labeledPointClouds.size());
+				#pragma omp parallel for
+				for (int f = 0;f < labeledPointClouds.size();f++)
+				{
+					jointEstimations[f] = estimateBallJointLocations(labeledPointClouds[f], cluster_indices[f], kdtrees[f]);
+				}
+
+				// update variances
+				auto startTimeVariance = std::chrono::high_resolution_clock::now();
+				Eigen::MatrixXd variances(labeledPointClouds.size(), labeledPointClouds.size());
+				#pragma omp parallel for
+				for (int f = 0; f < labeledPointClouds.size(); f++)
+				{
+					setupLogThreadName();
+					for (int g = 0; g < labeledPointClouds.size(); g++)
+					{
+						variances(f, g) = calculateVariance<pcl::PointXYZRGBL>(labeledPointClouds[f], kdtrees[g]);
+					}
+				}
+				auto endTimeVariance = std::chrono::high_resolution_clock::now();
+				auto VarianceRebuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeVariance - startTimeVariance).count();
+
+				// acquire offsets and point indices
+				std::vector<std::vector<pcl::PointIndices>> labeledPoints(labeledPointClouds.size());
+				for (int f = 0; f<labeledPointClouds.size(); f++)
+				{
+					labeledPoints[f] = getLabelIndices(labeledPointClouds[f]);
+				}
+				std::vector<int> labelOffsets(labeledPointClouds.size());
+				std::vector<int> jointOffsets(labeledPointClouds.size());
+				int totalNumLabels = 0;
+				int totalNumJoints = 0;
+				for (int f = 0; f < labeledPointClouds.size(); f++)
+				{
+					labelOffsets[f] = totalNumLabels;
+					totalNumLabels += labeledPoints[f].size();
+					jointOffsets[f] = totalNumJoints;
+					for (auto const &ent1 : jointEstimations[f])
+					{
+						totalNumJoints += ent1.second.size();
+
+					}
+				}
+				// build equation system
+				auto startTimeEQBuild = std::chrono::high_resolution_clock::now();
+				// 4 neighbouring frames
+				// rotations and translations = 6 paramters per frame
+				Eigen::SparseMatrix<double> A(2 * 6 * totalNumPoints + 6 * totalNumJoints, 6 * totalNumLabels);
+				//A.reserve(2 * totalNumPoints * 48);
+				Eigen::VectorXd b = Eigen::VectorXd::Zero(2 * 6 * totalNumPoints + 6 * totalNumJoints);
+
+				double energy = 0.0;
+
+				std::vector<Eigen::Triplet<double>> alltriplets;
+				alltriplets.reserve(2*totalNumPoints * 48);
+
+				#pragma omp parallel for
+				for (int f = 0; f < labeledPointClouds.size(); f++)
+				{
+					setupLogThreadName();
+
+					int neighbourIndex = 0;
+					double local_energy = 0.0;
+
+					std::vector<Eigen::Triplet<double>> triplets;
+					triplets.reserve(totalNumPoints * 48);
+
+					const std::array<int, 2> neighbouringFrames = { (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size() };
+					//const std::array<int, 4> neighbouringFrames = { (f - 2 + labeledPointClouds.size()) % labeledPointClouds.size(), (f - 1 + labeledPointClouds.size()) % labeledPointClouds.size(), (f + 1) % labeledPointClouds.size(), (f + 2) % labeledPointClouds.size() };
+					for (const auto g : neighbouringFrames)
+					{
+						if (g != f)
+						{
+							Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(6*labeledPointClouds[f]->size(), 6 * totalNumLabels);
+
+							std::vector<int> pointIdxNKNSearch(Nnear);
+							std::vector<float> pointNKNSquaredDistance(Nnear);
+
+							for (int n = 0; n < labeledPointClouds[f]->size(); n++)
+							{
+								std::vector<int> pointIdxNKNSearch(Nnear);
+								std::vector<float> pointNKNSquaredDistance(Nnear);
+
+								const auto& yfn = (*labeledPointClouds[f])[n];
+								auto numFoundPoints = kdtrees[g].nearestKSearch(yfn, Nnear, pointIdxNKNSearch, pointNKNSquaredDistance);
+								for (int i = 0; i < numFoundPoints; i++)
+								{
+									const auto& ygm = (*labeledPointClouds[g])[pointIdxNKNSearch[i]];
+
+									// No reason to precalculate "POld", as it get only calculated once with this implementation
+									const double pOverVar = calculatePOld(yfn, ygm, kdtrees[g], variances(f, g)) / variances(f, g);
+
+									// update energy
+									double distSquared = (yfn.x - ygm.x)*(yfn.x - ygm.x) + (yfn.y - ygm.y)*(yfn.y - ygm.y) + (yfn.z - ygm.z)*(yfn.z - ygm.z);
+									local_energy += pOverVar * distSquared / 2.0;
+
+									// row and column for buffer matrix
+									const int row = 6 * (2 * (cloudOffsets[f] + n) + neighbourIndex); // <-
+									const int row_ = 6 * n;
+									const int colf = 6 * (labelOffsets[f] + yfn.label);
+									const int colg = 6 * (labelOffsets[g] + ygm.label);
+
+									// precalculate shit
+									const Eigen::Matrix3d yfnhat = hat(yfn);
+									const Eigen::Matrix3d ygmhat = hat(ygm);
+									const auto yfnhat2 = yfnhat*yfnhat;
+									const auto yfngmhat = yfnhat*ygmhat;
+
+									// fill A
+									// I3
+									A_.block<3, 3>(row_, colf) += pOverVar*Eigen::Matrix3d::Identity();
+									// -y_f,n hat
+									A_.block<3, 3>(row_, colf + 3) += -pOverVar*yfnhat;
+									// -I3 
+									A_.block<3, 3>(row_, colg) += -pOverVar*Eigen::Matrix3d::Identity();
+									// y_g,m hat
+									A_.block<3, 3>(row_, colg + 3) += pOverVar*ygmhat;
+									// next row
+
+									// y_f,n hat
+									A_.block<3, 3>(row_ + 3, colf) += pOverVar*yfnhat;
+									// -y_f,n hat * y_f,n hat 
+									A_.block<3, 3>(row_ + 3, colf + 3) += -pOverVar*yfnhat2;
+									// -y_f,n hat
+									A_.block<3, 3>(row_ + 3, colg) += -pOverVar*yfnhat;
+									// y_f,n hat * y_g,m hat 
+									A_.block<3, 3>(row_ + 3, colg + 3) += pOverVar*yfngmhat;
+
+									// fill b
+									b(row + 0) += pOverVar*(ygm.x - yfn.x);
+									b(row + 1) += pOverVar*(ygm.y - yfn.y);
+									b(row + 2) += pOverVar*(ygm.z - yfn.z);
+
+									b(row + 3 + 0) += pOverVar*(yfn.y*ygm.z - yfn.z*ygm.y);
+									b(row + 3 + 1) += pOverVar*(yfn.z*ygm.x - yfn.x*ygm.z);
+									b(row + 3 + 2) += pOverVar*(yfn.x*ygm.y - yfn.y*ygm.x);
+								}
+							}
+
+							//for (int n = 0; n < labeledPointClouds[f]->size(); n++)
+							{
+
+								for (int row = 0; row < A_.rows(); row++)
+								{
+									for (int label = 0; label < A_.cols(); label++)
+									{
+										const auto val = A_(row, label);
+										if (val)
+										{
+											const int n = row / 6;
+											const int mappedrow = 6 * (2 * (cloudOffsets[f] + n) + neighbourIndex);
+											triplets.push_back({ mappedrow + (row % 6), label, val });
+										}
+									}
+								}
+								/*
+								const int row = 6 * (4 * (cloudOffsets[f] + n) + neighbourIndex);
+
+								const int colf = 6 * f;
+								const int colg = 6 * g;
+
+								triplets.push_back({ row + 0, colf + 0, A_(row_ + 0, colf_ + 0) });
+								triplets.push_back({ row + 1, colf + 1, A_(row_ + 1, colf_ + 1) });
+								triplets.push_back({ row + 2, colf + 2, A_(row_ + 2, colf_ + 2) });
+								// -y_f,n hat
+								triplets.push_back({ row + 0, colf + 3 + 1, A_(row_ + 0, colf_ + 3 + 1) });
+								triplets.push_back({ row + 0, colf + 3 + 2, A_(row_ + 0, colf_ + 3 + 2) });
+								triplets.push_back({ row + 1, colf + 3 + 0, A_(row_ + 1, colf_ + 3 + 0) });
+								triplets.push_back({ row + 1, colf + 3 + 2, A_(row_ + 1, colf_ + 3 + 2) });
+								triplets.push_back({ row + 2, colf + 3 + 0, A_(row_ + 2, colf_ + 3 + 0) });
+								triplets.push_back({ row + 2, colf + 3 + 1, A_(row_ + 2, colf_ + 3 + 1) });
+								// -I3 
+								triplets.push_back({ row + 0, colg + 0, A_(row_ + 0, colg_ + 0) });
+								triplets.push_back({ row + 1, colg + 1, A_(row_ + 1, colg_ + 1) });
+								triplets.push_back({ row + 2, colg + 2, A_(row_ + 2, colg_ + 2) });
+								// y_g,m hat
+								triplets.push_back({ row + 0, colg + 3 + 1, A_(row_ + 0, colg_ + 3 + 1) });
+								triplets.push_back({ row + 0, colg + 3 + 2, A_(row_ + 0, colg_ + 3 + 2) });
+								triplets.push_back({ row + 1, colg + 3 + 0, A_(row_ + 1, colg_ + 3 + 0) });
+								triplets.push_back({ row + 1, colg + 3 + 2, A_(row_ + 1, colg_ + 3 + 2) });
+								triplets.push_back({ row + 2, colg + 3 + 0, A_(row_ + 2, colg_ + 3 + 0) });
+								triplets.push_back({ row + 2, colg + 3 + 1, A_(row_ + 2, colg_ + 3 + 1) });
+								// next row
+								// y_f,n hat
+								triplets.push_back({ row + 3 + 0, colf + 3 + 1, A_(row_ + 3 + 0, colf_ + 3 + 1) });
+								triplets.push_back({ row + 3 + 0, colf + 3 + 2, A_(row_ + 3 + 0, colf_ + 3 + 2) });
+								triplets.push_back({ row + 3 + 1, colf + 3 + 0, A_(row_ + 3 + 1, colf_ + 3 + 0) });
+								triplets.push_back({ row + 3 + 1, colf + 3 + 2, A_(row_ + 3 + 1, colf_ + 3 + 2) });
+								triplets.push_back({ row + 3 + 2, colf + 3 + 0, A_(row_ + 3 + 2, colf_ + 3 + 0) });
+								triplets.push_back({ row + 3 + 2, colf + 3 + 1, A_(row_ + 3 + 2, colf_ + 3 + 1) });
+								// -y_f,n hat * y_f,n hat 
+								triplets.push_back({ row + 3 + 0, colf + 3 + 0, A_(row_ + 3 + 0, colf_ + 3 + 0) });
+								triplets.push_back({ row + 3 + 0, colf + 3 + 1, A_(row_ + 3 + 0, colf_ + 3 + 1) });
+								triplets.push_back({ row + 3 + 0, colf + 3 + 2, A_(row_ + 3 + 0, colf_ + 3 + 2) });
+								triplets.push_back({ row + 3 + 1, colf + 3 + 0, A_(row_ + 3 + 1, colf_ + 3 + 0) });
+								triplets.push_back({ row + 3 + 1, colf + 3 + 1, A_(row_ + 3 + 1, colf_ + 3 + 1) });
+								triplets.push_back({ row + 3 + 1, colf + 3 + 2, A_(row_ + 3 + 1, colf_ + 3 + 2) });
+								triplets.push_back({ row + 3 + 2, colf + 3 + 0, A_(row_ + 3 + 2, colf_ + 3 + 0) });
+								triplets.push_back({ row + 3 + 2, colf + 3 + 1, A_(row_ + 3 + 2, colf_ + 3 + 1) });
+								triplets.push_back({ row + 3 + 2, colf + 3 + 2, A_(row_ + 3 + 2, colf_ + 3 + 2) });
+								// -y_f,n hat
+								triplets.push_back({ row + 3 + 0, colg + 3 + 1, A_(row_ + 3 + 0, colg_ + 3 + 1) });
+								triplets.push_back({ row + 3 + 0, colg + 3 + 2, A_(row_ + 3 + 0, colg_ + 3 + 2) });
+								triplets.push_back({ row + 3 + 1, colg + 3 + 0, A_(row_ + 3 + 1, colg_ + 3 + 0) });
+								triplets.push_back({ row + 3 + 1, colg + 3 + 2, A_(row_ + 3 + 1, colg_ + 3 + 2) });
+								triplets.push_back({ row + 3 + 2, colg + 3 + 0, A_(row_ + 3 + 2, colg_ + 3 + 0) });
+								triplets.push_back({ row + 3 + 2, colg + 3 + 1, A_(row_ + 3 + 2, colg_ + 3 + 1) });
+								// y_f,n hat * y_g,m hat 
+								triplets.push_back({ row + 3 + 0, colg + 3 + 0, A_(row_ + 3 + 0, colg_ + 3 + 0) });
+								triplets.push_back({ row + 3 + 0, colg + 3 + 1, A_(row_ + 3 + 0, colg_ + 3 + 1) });
+								triplets.push_back({ row + 3 + 0, colg + 3 + 2, A_(row_ + 3 + 0, colg_ + 3 + 2) });
+								triplets.push_back({ row + 3 + 1, colg + 3 + 0, A_(row_ + 3 + 1, colg_ + 3 + 0) });
+								triplets.push_back({ row + 3 + 1, colg + 3 + 1, A_(row_ + 3 + 1, colg_ + 3 + 1) });
+								triplets.push_back({ row + 3 + 1, colg + 3 + 2, A_(row_ + 3 + 1, colg_ + 3 + 2) });
+								triplets.push_back({ row + 3 + 2, colg + 3 + 0, A_(row_ + 3 + 2, colg_ + 3 + 0) });
+								triplets.push_back({ row + 3 + 2, colg + 3 + 1, A_(row_ + 3 + 2, colg_ + 3 + 1) });
+								triplets.push_back({ row + 3 + 2, colg + 3 + 2, A_(row_ + 3 + 2, colg_ + 3 + 2) });
+								*/
+							}
+							neighbourIndex++;
+						}
+					}
+
+					int jointIndex = 0;
+					Eigen::MatrixXd A_ = Eigen::MatrixXd::Zero(6*totalNumJoints, 6*totalNumLabels);
+					for (auto const &ent1 : jointEstimations[f])
+					{
+						for (auto const &ent2 : ent1.second)
+						{
+							//const int row = 6 * (2 * totalNumPoints + (jointOffsets[f] + jointIndex));
+							const int row = 6 * jointIndex;
+							const int cola = 6 * (labelOffsets[f] + ent1.first);
+							const int colb = 6 * (labelOffsets[f] + ent2.first);
+
+							const auto& jointCentroid = ent2.second;
+							pcl::PointXYZ yfab;
+							jointCentroid.get(yfab);
+							auto yfabhat = hat(yfab);
+
+							// fill A
+							// I3
+							A_.block<3, 3>(row, cola) = 2 * alpha*Eigen::Matrix3d::Identity();
+							// -y_f,n hat
+							A_.block<3, 3>(row, cola + 3) = -2 * alpha*yfabhat;
+							// -I3 
+							A_.block<3, 3>(row, colb) = -2 * alpha*Eigen::Matrix3d::Identity();
+							// y_g,m hat
+							A_.block<3, 3>(row, colb + 3) = 2 * alpha*yfabhat;
+							// next row
+
+							// y_f,n hat
+							A_.block<3, 3>(row + 3, cola) = 2 * alpha*yfabhat;
+							// -y_f,n hat * y_f,n hat 
+							auto yfabhat2 = yfabhat*yfabhat;
+							A_.block<3, 3>(row + 3, cola + 3) = -2 * alpha*yfabhat2;
+							// -y_f,n hat
+							A_.block<3, 3>(row + 3, colb) = -2 * alpha*yfabhat;
+							// y_f,n hat * y_g,m hat 
+							A_.block<3, 3>(row + 3, colb + 3) = 2 * alpha*yfabhat2;
+
+							// fill b
+							b(row + 0) += 0;
+							b(row + 1) += 0;
+							b(row + 2) += 0;
+
+							b(row + 3 + 0) += 0;
+							b(row + 3 + 1) += 0;
+							b(row + 3 + 2) += 0;
+
+							jointIndex++;
+						}
+					}
+
+					for (int row = 0; row < A_.rows(); row++)
+					{
+						for (int label = 0; label < A_.cols(); label++)
+						{
+							const auto val = A_(row, label);
+							if (val)
+							{
+								const int n = row / 6;
+								const int mappedrow = 2*6*totalNumPoints + n;
+								triplets.push_back({ mappedrow + (n%6), label, val });
+							}
+						}
+					}
+					#pragma omp critical
+					{
+						alltriplets.insert(alltriplets.end(), triplets.begin(), triplets.end());
+						energy += local_energy;
+					}
+				}
+				A.setFromTriplets(alltriplets.begin(), alltriplets.end());
+				auto endTimeEQBuild = std::chrono::high_resolution_clock::now();
+				auto EQBuildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQBuild - startTimeEQBuild).count();
+
+				// solve equation system Ax=b to find rotation and translation deltas
+				auto startTimeEQSolve = std::chrono::high_resolution_clock::now();
+				Eigen::SPQR<Eigen::SparseMatrix<double>> solver(A);
+				if (solver.info() != Eigen::ComputationInfo::Success)
+				{
+					LOG_S(WARNING) << "Shit hits the fan (1)";
+					break;
+				}
+				Eigen::VectorXd delta = solver.solve(b);
+				if (solver.info() != Eigen::ComputationInfo::Success)
+				{
+					LOG_S(WARNING) << "Shit hits the fan (2)";
+					break;
+				}
+
+
+				auto endTimeEQSolve = std::chrono::high_resolution_clock::now();
+				auto EQSolveTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTimeEQSolve - startTimeEQSolve).count();
+				gradient = delta.squaredNorm();
+
+
+				for (int f = 0;f < labeledPointClouds.size();f++)
+				{
+					for (int label = 0; label < labeledPoints[f].size(); label++)
+					{
+						int transOffset = (labelOffsets[f] + label) * 6;
+						int rotOffset = (labelOffsets[f] + label) * 6 + 3;
+
+						Eigen::Vector3d l(delta(rotOffset), delta(rotOffset + 1), delta(rotOffset + 2));
+						Eigen::Vector3d m(delta(transOffset), delta(transOffset + 1), delta(transOffset + 2));
+						double phi = l.norm();
+						Eigen::Affine3d trafo = Eigen::Affine3d::Identity();
+						if (phi > 0.001 || phi < -0.001)
+						{
+							double phi2 = phi*phi;
+							auto lhat = hat(l);
+							auto lhat2 = lhat*lhat;
+							auto R = Eigen::Matrix3d::Identity() + lhat*sin(phi) / phi + lhat2*(1 - cos(phi)) / phi2;
+							trafo(0, 0) = R(0, 0);trafo(0, 1) = R(0, 1);trafo(0, 2) = R(0, 2);
+							trafo(1, 0) = R(1, 0);trafo(1, 1) = R(1, 1);trafo(1, 2) = R(1, 2);
+							trafo(2, 0) = R(2, 0);trafo(2, 1) = R(2, 1);trafo(2, 2) = R(2, 2);
+
+							auto t = ((Eigen::Matrix3d::Identity() - R)*lhat*m + l*l.transpose()*m) / phi2;
+							trafo(0, 3) = t(0);
+							trafo(1, 3) = t(1);
+							trafo(2, 3) = t(2);
+						}
+						else
+						{
+							trafo(0, 3) = m(0);
+							trafo(1, 3) = m(1);
+							trafo(2, 3) = m(2);
+						}
+
+						for (const auto &idx : labeledPoints[f][label].indices)
+						{
+							auto &pt = (*labeledPointClouds[f])[idx];
+							Eigen::Vector3d pos = { pt.x, pt.y, pt.z };
+							pos = trafo*pos;
+							pt.x = pos(0);
+							pt.y = pos(1);
+							pt.z = pos(2);
+						}
+					}
+				}
+
+				iteration++;
+				auto relativeError = (A*delta - b).norm() / b.norm();
+				LOG_F(INFO, "%-5i | %-10f | %-10i | %-10i | %-10i | %-10i | %-10f | %-10f ", iteration, gradient, KDTreeRebuildTime, VarianceRebuildTime, EQBuildTime, EQSolveTime, relativeError, energy);
+			} while (iteration < maxIterations && gradient > errorBound);
+		}
+		
 		// merge point clouds
 		pcl::PointCloud<pcl::PointXYZRGBL> completePointCloud;
 		for (int f = 0; f < labeledPointClouds.size(); f++)
@@ -2600,6 +3001,7 @@ public:
 			std::vector<int> pointIdxNKNSearch(Nnear);
 			std::vector<float> pointNKNSquaredDistance(Nnear);
 			LOG_SCOPE_F(INFO, "Starting non-rigid registration with max %i iterations and an error bound of %f.", maxIterations, errorBound);
+
 
 			int totalNumPoints = 0;
 			std::vector<int> cloudOffsets(labeledPointClouds.size());
